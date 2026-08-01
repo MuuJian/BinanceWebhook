@@ -1,4 +1,4 @@
-"""Entrypoint for the Binance Futures price alert worker."""
+"""Entrypoint for the Binance Futures price movement worker."""
 
 from __future__ import annotations
 
@@ -11,24 +11,38 @@ from config import ConfigError, load_config
 from detector import COOLDOWN_SECONDS, PriceMovementDetector
 from webhook import WebhookDispatcher, WebhookSender
 
+logger = logging.getLogger(__name__)
+
 
 def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs the complete request URL at INFO level. Webhook URLs often
+    # contain a secret token, so keep only library warnings and errors.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-async def run() -> None:
-    config = load_config()
-    stop_event = asyncio.Event()
-
+def _install_signal_handlers(stop_event: asyncio.Event) -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:  # pragma: no cover - Windows fallback
-            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop_event.set))
+            signal.signal(
+                sig,
+                lambda *_args, event=stop_event: loop.call_soon_threadsafe(
+                    event.set
+                ),
+            )
+
+
+async def run() -> None:
+    config = load_config()
+    stop_event = asyncio.Event()
+    _install_signal_handlers(stop_event)
 
     detector = PriceMovementDetector(
         symbols=config.alert_symbols,
@@ -51,7 +65,7 @@ async def run() -> None:
     monitor_task = asyncio.create_task(monitor.run(stop_event), name="binance-monitor")
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
 
-    logging.getLogger(__name__).info(
+    logger.info(
         "Worker started for %s (window=%ss, change levels=%s%%, cooldown=%ss)",
         ",".join(config.alert_symbols),
         config.alert_window_seconds,
@@ -72,7 +86,7 @@ async def run() -> None:
             monitor_task.cancel()
         await asyncio.gather(monitor_task, stop_task, return_exceptions=True)
         await dispatcher.stop()
-        logging.getLogger(__name__).info("Worker stopped cleanly")
+        logger.info("Worker stopped cleanly")
 
 
 def main() -> None:
@@ -80,7 +94,7 @@ def main() -> None:
     try:
         asyncio.run(run())
     except ConfigError as exc:
-        logging.getLogger(__name__).critical("Configuration error: %s", exc)
+        logger.critical("Configuration error: %s", exc)
         raise SystemExit(2) from exc
     except KeyboardInterrupt:
         pass
