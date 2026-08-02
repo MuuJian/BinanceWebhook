@@ -1,172 +1,128 @@
-# Binance Futures Price Movement Webhook Worker
+# Binance 合约价格异动提醒
 
-独立的 Python 后台 Worker，通过 Binance USDⓈ-M Futures WebSocket 实时订阅
-`aggTrade`，监控币种在滚动窗口内的上涨和下跌幅度，并异步发送 Webhook。
+监控 BTC, ETH, SOL 大额波动，通过 Webhook 发送提醒
 
-项目不包含网页、HTTP 服务、域名、`PORT`、Healthcheck、电话或邮件代码，也不需要
-Binance API Key。若 `WEBHOOK_URL` 指向电话告警服务，电话行为由外部服务执行。
+> 本项目只负责监控价格和发送提醒，不会自动下单，也不构成投资建议。
 
-## 监控逻辑
+## 提醒规则
+默认观察最近 5 分钟内的价格变化。
 
-默认监控 `BTCUSDT`、`ETHUSDT`、`SOLUSDT`，默认窗口为最近 5 分钟：
-
-```text
-rise_percent = (current_price / lowest_price - 1) * 100
-drop_percent = (current_price / highest_price - 1) * 100
-```
-
-提醒档位由 `ALERT_CHANGE_LEVELS` 直接设置。比如：
+提醒档位可以在 `.env` 中设置：
 
 ```env
 ALERT_CHANGE_LEVELS=3,6,9
 ```
 
-代表上涨和下跌方向分别在 3%、6%、9% 提醒。同一方向、同一档位不会重复提醒；
-该方向恢复到第一档以内后，才开始新一轮。
+表示：
 
-每个币种提醒后固定休息 30 秒，这个值写死在代码中。休息期间仍持续监控：如果
-跨过更高档位，只保留当前仍成立的最高档，休息结束后再提醒一次。
+- 上涨 3% 时提醒
+- 上涨 6% 时提醒
+- 上涨 9% 时提醒
+- 下跌方向也使用相同档位
 
-例如 5 分钟内逐步下跌 10%：
+同一币种、同一方向、同一档位不会一直重复提醒。
 
-- 跌至 3% 时提醒；
-- 30 秒内继续跌至 10%，不会连续拨打；
-- 休息结束时若跌幅仍成立，提醒 9% 档。
+每次提醒后会暂停 30 秒，避免短时间内连续发送太多消息。
 
-如果一笔成交直接从未触发状态跳到 10%，只提醒最高已跨越的 9% 档。
+例如 SOL 在 30 秒内从下跌 3% 继续跌到 10%，程序不会连续提醒 3%、6%、9%，而是在冷却结束后只提醒仍然成立的最高档位。
 
-提醒文字保持简短：
-
-```text
-SOLUSDT 5分钟内上涨3%
-SOLUSDT 5分钟内下跌6%
-```
-
-## 行情连接与过期数据保护
-
-使用 Binance 当前的 Market 路由：
-
-```text
-wss://fstream.binance.com/market/stream
-```
-
-- 原生 WebSocket ping/pong 心跳；
-- 超过 10 秒没有有效 `aggTrade` 时记录警告并重连；
-- 断线自动指数退避，最长 60 秒；
-- Binance 主动断开、代理故障和程序异常后自动恢复；
-- 收到超过 10 秒的旧事件时拒绝处理；
-- 任何断线都会清空价格窗口和待提醒档位，不使用过期高低点；
-- SIGINT/SIGTERM 优雅停止。
-
-项目包含 SOCKS 代理支持。如果运行环境设置了 SOCKS 代理，WebSocket 会自动使用。
-
-## Webhook
-
-Webhook 通过独立异步队列发送，不阻塞行情接收：
-
-- 每次请求有超时；
-- 最多尝试 3 次；
-- 失败后按 1 秒、2 秒指数退避；
-- HTTP 408、429、5xx 和网络错误会重试；
-- 其他 4xx 直接失败；
-- 日志不会输出可能包含令牌的完整 Webhook URL。
-
-### JSON 模式
-
-`WEBHOOK_BODY_FORMAT=json` 时发送完整 JSON：
-
-```json
-{
-  "event": "price_change_alert",
-  "market": "BINANCE:SOLUSDT",
-  "alert name": "SOLUSDT 5分钟内下跌3%",
-  "message": "SOLUSDT 5分钟内下跌3%",
-  "direction": "down",
-  "alertLevelPercent": 3.0,
-  "symbol": "SOLUSDT",
-  "currentPrice": 97.0,
-  "referencePrice": 100.0,
-  "peakPrice": 100.0,
-  "lowestPrice": 97.0,
-  "changePercent": -3.0,
-  "dropPercent": -3.0,
-  "risePercent": 0.0,
-  "windowSeconds": 300,
-  "eventTime": 1785571200000,
-  "triggeredAt": "2026-08-01T08:00:00+00:00"
-}
-```
-
-### TradingView/fwalert 纯文本兼容模式
-
-复用原先接收 TradingView 普通文本消息的 fwalert 链接时设置：
-
-```env
-WEBHOOK_BODY_FORMAT=text
-```
-
-请求使用 `Content-Type: text/plain; charset=utf-8`，正文只有一句提醒，避免 fwalert
-显示 `[object Object]`。
 
 ## 环境变量
 
-复制模板：
+先复制配置文件：
 
 ```bash
 cp .env.example .env
 ```
 
-| 变量 | 默认/示例值 | 说明 |
-|---|---:|---|
-| `WEBHOOK_URL` | 必填 | 接收 Webhook POST 的 HTTP(S) 地址 |
-| `WEBHOOK_BODY_FORMAT` | `json` | `json` 或 `text` |
-| `ALERT_SYMBOLS` | `BTCUSDT,ETHUSDT,SOLUSDT` | 逗号分隔的合约代码 |
-| `ALERT_WINDOW_SECONDS` | `300` | 滚动窗口秒数 |
-| `ALERT_CHANGE_LEVELS` | `3,6,9` | 递增的上涨/下跌提醒档位 |
-| `WEBHOOK_TIMEOUT_SECONDS` | `10` | 单次 Webhook 请求超时 |
+然后编辑 `.env`：
 
-真实 Webhook 地址只写入 `.env` 或 Railway Variables。`.env` 已加入 `.gitignore`，
-不要把地址写进代码、`.env.example`、README 或提交记录。
+```env
+WEBHOOK_URL=https://example.com/webhook
+WEBHOOK_BODY_FORMAT=json
+ALERT_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+ALERT_WINDOW_SECONDS=300
+ALERT_CHANGE_LEVELS=3,6,9
+WEBHOOK_TIMEOUT_SECONDS=10
+```
+
+各项含义：
+
+| 变量 | 说明 |
+|---|---|
+| `WEBHOOK_URL` | 接收提醒的地址，必须填写 |
+| `WEBHOOK_BODY_FORMAT` | `json` 或 `text` |
+| `ALERT_SYMBOLS` | 要监控的币种 |
+| `ALERT_WINDOW_SECONDS` | 统计最近多少秒的涨跌 |
+| `ALERT_CHANGE_LEVELS` | 提醒档位 |
+| `WEBHOOK_TIMEOUT_SECONDS` | Webhook 请求超时时间 |
 
 ## 本地运行
 
-建议使用 Python 3.11 或更新版本：
+建议使用 Python 3.11 或更新版本。
+
+创建虚拟环境：
 
 ```bash
 python3 -m venv .venv
+```
+
+启用虚拟环境：
+
+```bash
 source .venv/bin/activate
+```
+
+安装依赖：
+
+```bash
 pip install -r requirements.txt
+```
+
+复制配置文件：
+
+```bash
 cp .env.example .env
+```
+
+填写好 `.env` 后启动：
+
+```bash
 python main.py
 ```
 
-按 `Ctrl+C` 停止。
+停止程序：
 
-### VS Code
+```text
+Ctrl+C
+```
 
-用 VS Code 打开项目，安装推荐的 Python 扩展，在“运行和调试”中选择
-`Binance Webhook Worker`。启动配置自动使用 `.venv` 和 `.env`。
+## 测试提醒
 
-### 本地测试 Webhook
+可以使用 webhook.site 创建一个临时接收地址，并写进 `.env`。
 
-可在 [webhook.site](https://webhook.site/) 创建临时接收地址并写入 `.env`。为方便
-快速触发，可临时设置：
+为了快速触发提醒，可以暂时设置：
 
 ```env
 ALERT_SYMBOLS=SOLUSDT
 ALERT_CHANGE_LEVELS=0.01
 ```
 
-启动 `python main.py`，在接收页面核对正文或 JSON。测试完成后恢复正式档位。
-如果 URL 指向 fwalert，测试会触发其外部电话规则。
+然后运行：
 
-## Railway 后台 Worker
+```bash
+python main.py
+```
 
-1. 在 Railway Variables 中配置上述环境变量；
-2. Start Command 设置为 `python main.py`；
-3. 不生成域名；
-4. 不配置 Networking、`PORT` 或 Healthcheck；
-5. 关闭 Serverless/App Sleeping，保证 Worker 持续运行。
+## 自动恢复
 
-若 WebSocket 握手返回 HTTP 403/451，日志会提示可能存在部署地区限制。请选择
-Binance Futures 可访问且符合当地法规与平台条款的 Railway 地区。
+程序断线后会自动重连。
+
+重新连接时会清空旧的价格记录，避免使用断线前的数据继续计算涨跌幅。
+
+Webhook 暂时发送失败时也会自动重试，不会影响价格监控。
+
+## 数据来源
+
+- Binance USDⓈ-M Futures：实时成交价格
+- 用户设置的 Webhook：接收提醒并执行后续操作
