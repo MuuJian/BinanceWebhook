@@ -1,0 +1,12 @@
+# 业务参数默认值；部署平台的同名环境变量可以覆盖这些值。
+window_seconds: 120
+threshold_pct: 3.0
+cooldown_seconds: 30
+
+evaluation_interval_seconds: 1
+min_points: 20
+warmup_seconds: 60
+
+webhook:
+  timeout_seconds: 10
+  max_retries: 3
