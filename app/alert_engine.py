@@ -26,7 +26,7 @@ class Alert:
 class _DirectionState:
     generation: int = -1
     highest_sent_tier: int = 0
-    pending_tier: int = 0
+    reset_below_since: float | None = None
     last_sent_monotonic: float = -math.inf
 
 
@@ -38,6 +38,8 @@ class AlertEngine:
         store: PriceWindowStore,
         queue: asyncio.Queue[Alert],
         threshold_pct: float,
+        reset_pct: float,
+        reset_confirm_seconds: float,
         cooldown_seconds: float,
         evaluation_interval_seconds: float,
         min_points: int,
@@ -48,6 +50,8 @@ class AlertEngine:
         self.store = store
         self.queue = queue
         self.threshold_pct = threshold_pct
+        self.reset_pct = reset_pct
+        self.reset_confirm_seconds = reset_confirm_seconds
         self.cooldown_seconds = cooldown_seconds
         self.evaluation_interval_seconds = evaluation_interval_seconds
         self.min_points = min_points
@@ -87,6 +91,16 @@ class AlertEngine:
             down_pct = (
                 1 - snapshot.current_price / snapshot.highest_price
             ) * 100
+            movements = {"up": up_pct, "down": down_pct}
+            for direction, movement in movements.items():
+                self._update_reset_state(
+                    symbol,
+                    direction,
+                    movement,
+                    snapshot.generation,
+                    now,
+                )
+
             candidates: list[tuple[str, float, float, int]] = []
             if up_pct >= self.threshold_pct:
                 candidates.append(
@@ -101,15 +115,6 @@ class AlertEngine:
                         snapshot.high_event_time_ms,
                     )
                 )
-
-            # Recovery is evaluated independently for each direction, even
-            # when both directions are technically true in a wide window.
-            active_directions = {item[0] for item in candidates}
-            for direction in ("up", "down"):
-                state = self._state(symbol, direction, snapshot.generation)
-                if direction not in active_directions:
-                    state.highest_sent_tier = 0
-                    state.pending_tier = 0
 
             if len(candidates) == 2:
                 candidates.sort(key=lambda item: (item[3], item[1]), reverse=True)
@@ -127,8 +132,41 @@ class AlertEngine:
         if state.generation != generation:
             state.generation = generation
             state.highest_sent_tier = 0
-            state.pending_tier = 0
+            state.reset_below_since = None
         return state
+
+    def _update_reset_state(
+        self,
+        symbol: str,
+        direction: str,
+        movement: float,
+        generation: int,
+        now: float,
+    ) -> None:
+        state = self._state(symbol, direction, generation)
+        if state.highest_sent_tier == 0:
+            state.reset_below_since = None
+            return
+        if movement > self.reset_pct:
+            state.reset_below_since = None
+            return
+        if state.reset_below_since is None:
+            state.reset_below_since = now
+            return
+        if now - state.reset_below_since < self.reset_confirm_seconds:
+            return
+
+        previous_tier = state.highest_sent_tier
+        state.highest_sent_tier = 0
+        state.reset_below_since = None
+        # Preserve the send timestamp so a new round cannot bypass the hard
+        # cooldown and place two calls less than COOLDOWN_SECONDS apart.
+        logger.info(
+            "Alert state reset: symbol=%s direction=%s previous_level=%g%%",
+            symbol,
+            direction,
+            previous_tier * self.threshold_pct,
+        )
 
     def _consider(
         self,
@@ -140,23 +178,21 @@ class AlertEngine:
         now: float,
     ) -> None:
         state = self._state(symbol, direction, snapshot.generation)
-        tier = max(1, int(math.floor((movement + 1e-12) / self.threshold_pct)))
-        if tier <= state.highest_sent_tier:
-            state.pending_tier = 0
+        next_tier = state.highest_sent_tier + 1
+        next_threshold = next_tier * self.threshold_pct
+        if movement + 1e-12 < next_threshold:
             return
-        # A higher tier is pending only while the current movement still
-        # satisfies it. A brief spike must not cause a delayed stale alert.
-        state.pending_tier = tier
         if now - state.last_sent_monotonic < self.cooldown_seconds:
             return
 
-        send_tier = state.pending_tier
+        send_tier = next_tier
         action = "上涨" if direction == "up" else "下跌"
         minutes = self.window_seconds / 60
         window_label = f"{minutes:g}分钟"
         message = (
             f"{symbol} 合约{window_label}内{action}{movement:.2f}%，"
-            f"当前价格{snapshot.current_price:g}，参考价格{reference:g}"
+            f"触发{next_threshold:g}%档提醒，当前价格{snapshot.current_price:g}，"
+            f"参考价格{reference:g}"
         )
         alert = Alert(symbol, direction, send_tier, movement, message)
         try:
@@ -164,8 +200,7 @@ class AlertEngine:
         except asyncio.QueueFull:
             logger.error("Webhook queue is full; alert dropped for %s", symbol)
             return
-        state.pending_tier = 0
-        state.highest_sent_tier = max(state.highest_sent_tier, send_tier)
+        state.highest_sent_tier = send_tier
         state.last_sent_monotonic = now
         logger.info(
             "Price alert queued: symbol=%s direction=%s level=%g%% movement=%.2f%%",
