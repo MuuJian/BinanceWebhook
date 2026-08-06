@@ -8,8 +8,6 @@
 - ETHUSDT
 - SOLUSDT
 
-不需要 Binance API Key。
-
 ## 提醒规则
 
 默认观察最近 2 分钟的价格，涨跌达到 3%时提醒。
