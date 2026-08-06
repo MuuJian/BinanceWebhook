@@ -15,6 +15,7 @@ from app.price_window import PriceWindowStore
 
 logger = logging.getLogger(__name__)
 NO_DATA_TIMEOUT_SECONDS = 10
+STATUS_LOG_INTERVAL_SECONDS = 30
 MAX_EVENT_AGE_MS = 10_000
 MAX_RECONNECT_DELAY_SECONDS = 30
 STABLE_CONNECTION_SECONDS = 60
@@ -43,6 +44,7 @@ class BinanceMiniTickerReceiver:
             self.store.clear_all()
             connected_at: float | None = None
             last_valid_at: dict[str, float] = {}
+            last_status_log_at: float | None = None
 
             try:
                 logger.info("Connecting to Binance USD-M Futures miniTicker stream")
@@ -58,6 +60,7 @@ class BinanceMiniTickerReceiver:
                     last_valid_at = {
                         symbol: connected_at for symbol in self.symbols
                     }
+                    last_status_log_at = connected_at
                     logger.info("Binance Futures WebSocket connected")
 
                     while not stop_event.is_set():
@@ -85,6 +88,13 @@ class BinanceMiniTickerReceiver:
                             raise StaleMarketData(
                                 "no current data for " + ",".join(silent_symbols)
                             )
+                        if (
+                            last_status_log_at is not None
+                            and now - last_status_log_at
+                            >= STATUS_LOG_INTERVAL_SECONDS
+                        ):
+                            self._log_market_status()
+                            last_status_log_at = now
             except asyncio.CancelledError:
                 raise
             except StaleMarketData as exc:
@@ -128,6 +138,19 @@ class BinanceMiniTickerReceiver:
             return None
         logger.debug("%s latest price %.8f", symbol, price)
         return symbol
+
+    def _log_market_status(self) -> None:
+        details: list[str] = []
+        for symbol in self.symbols:
+            snapshot = self.store.snapshot(symbol)
+            if snapshot is None:
+                details.append(f"{symbol}=预热中")
+                continue
+            details.append(
+                f"{symbol}={snapshot.current_price:.2f}"
+                f"({len(snapshot.points)}个点)"
+            )
+        logger.info("Binance 行情正常：%s", " ".join(details))
 
     def _parse_message(
         self, raw_message: str | bytes
