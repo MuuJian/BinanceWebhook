@@ -1,4 +1,4 @@
-"""Load and validate YAML business settings and private environment values."""
+"""Environment-only configuration for the Binance alert worker."""
 
 from __future__ import annotations
 
@@ -7,24 +7,21 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlparse
 
-import yaml
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 FIXED_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 FIXED_WEBSOCKET_URL = (
     "wss://fstream.binance.com/market/stream?streams="
-    "btcusdt@miniTicker/ethusdt@miniTicker/solusdt@miniTicker"
+    "btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade"
 )
 
 
 class ConfigError(ValueError):
-    """Raised when a required setting is missing or invalid."""
+    """Raised when an environment setting is missing or invalid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +35,7 @@ class WebhookConfig:
 class AppConfig:
     symbols: tuple[str, ...]
     websocket_url: str
+    websocket_proxy: str | None
     window_seconds: int
     threshold_pct: float
     cooldown_seconds: float
@@ -48,65 +46,65 @@ class AppConfig:
     log_level: int
 
 
-def _mapping(value: Any, name: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ConfigError(f"{name} must be a YAML mapping")
+def _positive_float(name: str, default: str) -> float:
+    raw = os.getenv(name, default).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number greater than zero") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{name} must be a finite number greater than zero")
     return value
 
 
-def _positive_number(value: Any, name: str) -> float:
-    if isinstance(value, bool):
-        raise ConfigError(f"{name} must be a positive number")
+def _positive_int(name: str, default: str, *, minimum: int = 1) -> int:
+    raw = os.getenv(name, default).strip()
     try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{name} must be a positive number") from exc
-    if not math.isfinite(number) or number <= 0:
-        raise ConfigError(f"{name} must be a finite number greater than zero")
-    return number
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+    if str(value) != raw or value < minimum:
+        raise ConfigError(f"{name} must be an integer of at least {minimum}")
+    return value
 
 
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool):
-        raise ConfigError(f"{name} must be a positive integer")
+def _nonnegative_int(name: str, default: str) -> int:
+    raw = os.getenv(name, default).strip()
     try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{name} must be a positive integer") from exc
-    if isinstance(value, float) and not value.is_integer():
-        raise ConfigError(f"{name} must be a positive integer")
-    if isinstance(value, str) and str(number) != value.strip():
-        raise ConfigError(f"{name} must be a positive integer")
-    if number <= 0:
-        raise ConfigError(f"{name} must be a positive integer")
-    return number
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a non-negative integer") from exc
+    if str(value) != raw or value < 0:
+        raise ConfigError(f"{name} must be a non-negative integer")
+    return value
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8") as config_file:
-            raw = yaml.safe_load(config_file)
-    except FileNotFoundError as exc:
-        raise ConfigError(f"Configuration file not found: {path}") from exc
-    except (OSError, yaml.YAMLError) as exc:
-        raise ConfigError(
-            f"Unable to read configuration file: {type(exc).__name__}"
-        ) from exc
-    return _mapping(raw, "config.yaml")
-
-
-def _validate_webhook_url(value: str) -> str:
-    url = value.strip()
-    parsed = urlparse(url)
+def _webhook_url() -> str:
+    # WEBHOOK_URL keeps existing local installations working during migration.
+    value = os.getenv("CALL_WEBHOOK_URL", "").strip()
+    if not value:
+        value = os.getenv("WEBHOOK_URL", "").strip()
+    parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigError("CALL_WEBHOOK_URL must be a valid http:// or https:// URL")
-    return url
+        raise ConfigError(
+            "CALL_WEBHOOK_URL must be a valid http:// or https:// URL"
+        )
+    return value
 
 
-def _parse_log_level(value: Any) -> int:
-    if not isinstance(value, str):
-        raise ConfigError("LOG_LEVEL must be a string")
-    level_name = value.strip().upper()
+def _proxy_url() -> str | None:
+    value = os.getenv("WS_PROXY_URL", "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    supported = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+    if parsed.scheme.lower() not in supported or not parsed.hostname:
+        raise ConfigError("WS_PROXY_URL has an unsupported or invalid proxy URL")
+    return value
+
+
+def _log_level() -> int:
+    name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
     levels = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
@@ -114,93 +112,38 @@ def _parse_log_level(value: Any) -> int:
         "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
-    try:
-        return levels[level_name]
-    except KeyError as exc:
+    if name not in levels:
         raise ConfigError(
             "LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL"
-        ) from exc
+        )
+    return levels[name]
 
 
-def _setting(raw: dict[str, Any], key: str, environment_name: str) -> Any:
-    """Use a dashboard environment variable when present, else YAML."""
-
-    if environment_name in os.environ:
-        return os.environ[environment_name].strip()
-    return raw.get(key)
-
-
-def load_config(
-    *,
-    config_path: Path = DEFAULT_CONFIG_PATH,
-    env_path: Path = DEFAULT_ENV_PATH,
-) -> AppConfig:
-    """Load configuration without allowing .env to override deployed variables."""
+def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
+    """Load local .env values without overriding deployment variables."""
 
     load_dotenv(env_path, override=False)
-    raw = _load_yaml(config_path)
-
-    webhook_raw = _mapping(raw.get("webhook"), "webhook")
-
-    window_seconds = _positive_int(
-        _setting(raw, "window_seconds", "WINDOW_SECONDS"), "window_seconds"
-    )
-    threshold_pct = _positive_number(
-        _setting(raw, "threshold_pct", "THRESHOLD_PCT"), "threshold_pct"
-    )
-    cooldown_seconds = _positive_number(
-        _setting(raw, "cooldown_seconds", "COOLDOWN_SECONDS"),
-        "cooldown_seconds",
-    )
-    evaluation_interval_seconds = _positive_number(
-        _setting(
-            raw,
-            "evaluation_interval_seconds",
-            "EVALUATION_INTERVAL_SECONDS",
-        ),
-        "evaluation_interval_seconds",
-    )
-    min_points = _positive_int(
-        _setting(raw, "min_points", "MIN_POINTS"), "min_points"
-    )
-    warmup_seconds = _positive_number(
-        _setting(raw, "warmup_seconds", "WARMUP_SECONDS"), "warmup_seconds"
-    )
-    if min_points < 2:
-        raise ConfigError("min_points must be at least 2")
+    window_seconds = _positive_int("WINDOW_SECONDS", "120")
+    warmup_seconds = _positive_float("WARMUP_SECONDS", "60")
     if warmup_seconds > window_seconds:
-        raise ConfigError("warmup_seconds must not exceed window_seconds")
-
-    # WEBHOOK_URL remains a private, temporary compatibility fallback so an
-    # existing local .env keeps working while deployments migrate to the name
-    # required by the new specification.
-    webhook_url = os.getenv("CALL_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+        raise ConfigError("WARMUP_SECONDS must not exceed WINDOW_SECONDS")
 
     return AppConfig(
         symbols=FIXED_SYMBOLS,
         websocket_url=FIXED_WEBSOCKET_URL,
+        websocket_proxy=_proxy_url(),
         window_seconds=window_seconds,
-        threshold_pct=threshold_pct,
-        cooldown_seconds=cooldown_seconds,
-        evaluation_interval_seconds=evaluation_interval_seconds,
-        min_points=min_points,
+        threshold_pct=_positive_float("THRESHOLD_PCT", "3"),
+        cooldown_seconds=_positive_float("COOLDOWN_SECONDS", "30"),
+        evaluation_interval_seconds=_positive_float(
+            "EVALUATION_INTERVAL_SECONDS", "1"
+        ),
+        min_points=_positive_int("MIN_POINTS", "20", minimum=2),
         warmup_seconds=warmup_seconds,
         webhook=WebhookConfig(
-            url=_validate_webhook_url(webhook_url),
-            timeout_seconds=_positive_number(
-                _setting(
-                    webhook_raw,
-                    "timeout_seconds",
-                    "WEBHOOK_TIMEOUT_SECONDS",
-                ),
-                "webhook.timeout_seconds",
-            ),
-            max_retries=_positive_int(
-                _setting(webhook_raw, "max_retries", "WEBHOOK_MAX_RETRIES"),
-                "webhook.max_retries",
-            ),
+            url=_webhook_url(),
+            timeout_seconds=_positive_float("WEBHOOK_TIMEOUT_SECONDS", "10"),
+            max_retries=_nonnegative_int("WEBHOOK_MAX_RETRIES", "3"),
         ),
-        log_level=_parse_log_level(os.getenv("LOG_LEVEL", "INFO")),
+        log_level=_log_level(),
     )

@@ -1,4 +1,4 @@
-"""Application lifecycle for the Binance Futures volatility worker."""
+"""Application lifecycle for the Binance alert background worker."""
 
 from __future__ import annotations
 
@@ -7,83 +7,77 @@ import logging
 import signal
 import sys
 
-from app.binance_ws import BinanceMiniTickerReceiver
+from app.alert_engine import Alert, AlertEngine
 from app.config import AppConfig, ConfigError, load_config
-from app.evaluator import ALERT_LOG_LEVEL, Alert, PriceEvaluator
-from app.notifier import WebhookSender, WebhookWorker
+from app.market_stream import BinanceAggTradeReceiver
 from app.price_window import PriceWindowStore
+from app.webhook import WebhookWorker
 
 logger = logging.getLogger(__name__)
-ALERT_QUEUE_SIZE = 100
+
+
+class _BelowWarning(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
 
 
 def configure_logging(level: int) -> None:
-    logging.addLevelName(ALERT_LOG_LEVEL, "ALERT")
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-        force=True,
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    # httpx otherwise logs the full secret-bearing Webhook URL at INFO level.
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(level)
+    stdout_handler.addFilter(_BelowWarning())
+    stdout_handler.setFormatter(formatter)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(max(level, logging.WARNING))
+    stderr_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(stdout_handler)
+    root.addHandler(stderr_handler)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def _install_signal_handlers(stop_event: asyncio.Event) -> None:
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:  # pragma: no cover - Windows fallback
-            signal.signal(
-                sig,
-                lambda *_args, event=stop_event: loop.call_soon_threadsafe(
-                    event.set
-                ),
-            )
-
-
-async def run(config: AppConfig) -> None:
+async def run_worker(config: AppConfig) -> None:
     stop_event = asyncio.Event()
-    _install_signal_handlers(stop_event)
-    store = PriceWindowStore(config.symbols, config.window_seconds)
-    alert_queue: asyncio.Queue[Alert] = asyncio.Queue(maxsize=ALERT_QUEUE_SIZE)
+    loop = asyncio.get_running_loop()
+    for name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except NotImplementedError:
+                pass
 
-    receiver = BinanceMiniTickerReceiver(
+    store = PriceWindowStore(config.symbols, config.window_seconds)
+    queue: asyncio.Queue[Alert] = asyncio.Queue(maxsize=100)
+    receiver = BinanceAggTradeReceiver(
         websocket_url=config.websocket_url,
+        websocket_proxy=config.websocket_proxy,
         symbols=config.symbols,
         store=store,
     )
-    evaluator = PriceEvaluator(
-        store=store,
-        alert_queue=alert_queue,
+    engine = AlertEngine(
         symbols=config.symbols,
-        window_seconds=config.window_seconds,
+        store=store,
+        queue=queue,
         threshold_pct=config.threshold_pct,
         cooldown_seconds=config.cooldown_seconds,
         evaluation_interval_seconds=config.evaluation_interval_seconds,
         min_points=config.min_points,
         warmup_seconds=config.warmup_seconds,
+        window_seconds=config.window_seconds,
     )
-    sender = WebhookSender(
-        url=config.webhook.url,
-        timeout_seconds=config.webhook.timeout_seconds,
-        max_retries=config.webhook.max_retries,
-    )
-    webhook_worker = WebhookWorker(queue=alert_queue, sender=sender)
-    await sender.start()
-
-    tasks = {
-        asyncio.create_task(receiver.run(stop_event), name="websocket-receiver"),
-        asyncio.create_task(evaluator.run(stop_event), name="price-evaluator"),
-        asyncio.create_task(webhook_worker.run(), name="webhook-worker"),
-    }
-    stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
+    webhook = WebhookWorker(config.webhook, queue)
 
     logger.info(
-        "Worker started: symbols=%s window=%ss threshold=%.2f%% "
-        "cooldown=%ss evaluation=%ss",
+        "Worker started: symbols=%s window=%ss threshold=%g%% cooldown=%gs "
+        "evaluation=%gs",
         ",".join(config.symbols),
         config.window_seconds,
         config.threshold_pct,
@@ -91,44 +85,40 @@ async def run(config: AppConfig) -> None:
         config.evaluation_interval_seconds,
     )
 
-    try:
-        done, _ = await asyncio.wait(
-            tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in done:
-            if task is not stop_task:
-                await task
-    finally:
-        stop_event.set()
-        stop_task.cancel()
-        for task in tasks:
-            if task.get_name() != "webhook-worker":
-                task.cancel()
-        await asyncio.gather(
-            *(task for task in tasks if task.get_name() != "webhook-worker"),
-            stop_task,
-            return_exceptions=True,
-        )
+    market_task = asyncio.create_task(receiver.run(stop_event), name="market")
+    engine_task = asyncio.create_task(engine.run(stop_event), name="engine")
+    webhook_task = asyncio.create_task(webhook.run(), name="webhook")
+    worker_tasks = {market_task, engine_task, webhook_task}
+    stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
+    done, _ = await asyncio.wait(
+        worker_tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    fatal_error: BaseException | None = None
+    for task in done:
+        if task is stop_task:
+            continue
+        if task.cancelled():
+            fatal_error = RuntimeError(f"{task.get_name()} task was cancelled")
+        else:
+            fatal_error = task.exception() or RuntimeError(
+                f"{task.get_name()} task stopped unexpectedly"
+            )
+        break
 
-        pending_messages = alert_queue.qsize() + 1
-        retry_delay = 2**config.webhook.max_retries - 1
-        per_message_timeout = (
-            config.webhook.timeout_seconds * (config.webhook.max_retries + 1)
-            + retry_delay
-            + 2
-        )
-        drain_timeout = min(300.0, max(15.0, pending_messages * per_message_timeout))
+    stop_event.set()
+    logger.info("Shutdown requested; stopping market receiver and alert engine")
+    await asyncio.gather(market_task, engine_task, return_exceptions=True)
+    if fatal_error is None or not webhook_task.done():
         try:
-            await asyncio.wait_for(alert_queue.join(), timeout=drain_timeout)
+            await asyncio.wait_for(queue.join(), timeout=15)
         except asyncio.TimeoutError:
-            logger.error("Timed out while draining the Webhook queue")
-
-        for task in tasks:
-            if task.get_name() == "webhook-worker":
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await sender.close()
-        logger.info("Worker stopped cleanly")
+            logger.warning("Webhook queue did not drain within 15s")
+    webhook_task.cancel()
+    stop_task.cancel()
+    await asyncio.gather(webhook_task, stop_task, return_exceptions=True)
+    logger.info("Worker stopped")
+    if fatal_error is not None:
+        raise RuntimeError("A background task failed") from fatal_error
 
 
 def main() -> None:
@@ -138,13 +128,8 @@ def main() -> None:
         configure_logging(logging.INFO)
         logger.critical("Configuration error: %s", exc)
         raise SystemExit(2) from exc
-
     configure_logging(config.log_level)
     try:
-        asyncio.run(run(config))
+        asyncio.run(run_worker(config))
     except KeyboardInterrupt:
         pass
-
-
-if __name__ == "__main__":
-    main()

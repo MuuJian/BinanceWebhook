@@ -1,122 +1,103 @@
 # Binance 合约波动电话提醒 Worker
 
-纯后台 Python 服务，仅连接 Binance USDⓈ-M Futures WebSocket，固定监听：
+这是一个独立的 Python 后台 Worker，只负责实时监控 Binance USDⓈ-M Futures 行情，
+并把波动提醒发送到 Webhook。固定监听：
 
 - `BTCUSDT`
 - `ETHUSDT`
 - `SOLUSDT`
 
-程序使用 `miniTicker` 实时价格，在内存中保存最近 120 秒数据。任一合约在窗口内
-相对最低价上涨达到 3%，或相对最高价下跌达到 3%，即把纯文本提醒异步发送给
-fwalert Webhook。
+项目没有网页、HTTP 服务、域名、`PORT`、Healthcheck、电话或邮件代码，也不需要
+Binance API Key。电话由 fwalert 等外部 Webhook 服务负责。
 
-项目没有网页、HTTP 服务、域名、`PORT`、Healthcheck、电话或邮件实现。电话由
-fwalert 外部服务负责，也不需要 Binance API Key。
+## 行情与内存占用
 
-## 触发规则
+程序订阅实时 `aggTrade`，不会用 REST 轮询。每一笔成交都会参与计算，但不会把每笔
+成交长期保存在内存中：同一秒内的成交会压缩成一个 OHLC 桶，保留该秒的最高价、
+最低价、收盘价和成交数。因此默认 120 秒窗口中，每个币种大约只保留 120 个桶；
+快速插针的高低点仍然保留。
+
+默认每 30 秒输出一次行情健康日志，包括当前价格、窗口成交数、桶数量和数据年龄。
+任一币种超过 10 秒没有新数据，全部价格窗口会立即清空并重连，不会使用过期行情
+发送提醒。
+
+## 波动提醒规则
+
+默认使用最近 120 秒窗口：
 
 ```text
-up_pct = (当前价 - 窗口最低价) / 窗口最低价 * 100
-down_pct = (当前价 - 窗口最高价) / 窗口最高价 * 100
+上涨百分比 = (当前价 / 窗口最低价 - 1) * 100
+下跌百分比 = (1 - 当前价 / 窗口最高价) * 100
 ```
 
-每秒评估一次，触发前必须同时满足：
+`THRESHOLD_PCT=3` 会自动生成 3%、6%、9%、12%……递进档位：
 
-- 窗口跨度至少 60 秒；
-- 窗口内至少有 20 个价格点；
-- `up_pct >= 3.0` 或 `down_pct <= -3.0`；
-- 相同币种、相同方向不在 30 秒冷静期内。
+- 同一轮上涨或下跌，每跨过一个新档位提醒一次；
+- 30 秒冷静期内跨档会暂存，冷静期结束时只有仍满足该档才发送；
+- 从 9%回落到 7%或 4%不会倒序重复提醒；
+- 只有波动回到 3%以内，该方向的档位才复位；
+- 上涨和下跌分别记录；
+- 若一个宽幅窗口同时满足上涨和下跌，使用发生时间更近的参考极值，避免同一时刻
+  发出相反提醒。
 
-上涨和下跌分别计算冷静期。例如 `BTCUSDT up` 不影响 `BTCUSDT down`，也不影响
-其他币种。只要波动条件持续成立，冷静期结束后可以再次提醒。
-
-提醒正文示例：
-
-```text
-BTCUSDT 合约2分钟内上涨3.24%，当前价格70120.50，参考价格67920.00
-ETHUSDT 合约2分钟内下跌3.12%，当前价格3686.00，参考价格3800.00
-```
-
-## 项目结构
+提醒是纯文本，例如：
 
 ```text
-app/
-  main.py          程序生命周期与三个后台任务
-  config.py        YAML、环境变量读取和校验
-  binance_ws.py    miniTicker 接收、心跳、过期保护和重连
-  price_window.py  每个币种的内存价格窗口
-  evaluator.py     每秒评估与方向冷静期
-  notifier.py      纯文本 Webhook、重试和独立 Worker
-config.yaml        默认业务参数
-main.py            Railway 兼容启动入口
+BTCUSDT 合约2分钟内上涨3.24%，当前价格70120.5，参考价格67920
+ETHUSDT 合约2分钟内下跌3.12%，当前价格3686，参考价格3800
 ```
 
 ## 配置
 
-`config.yaml` 只保留有必要调整的默认业务参数：
+项目不使用 YAML。配置只来自 Railway Variables 或本地 `.env`，程序内提供默认值。
 
-```yaml
-window_seconds: 120
-threshold_pct: 3.0
-cooldown_seconds: 30
-evaluation_interval_seconds: 1
-min_points: 20
-warmup_seconds: 60
-webhook:
-  timeout_seconds: 10
-  max_retries: 3
-```
-
-固定币种和 Binance `miniTicker` 地址写在程序中，避免部署时误改。
-
-复制私密配置模板：
+本地复制模板：
 
 ```bash
 cp .env.example .env
 ```
 
-然后填写：
+必须填写：
 
 ```env
 CALL_WEBHOOK_URL=https://fwalert.com/你的-webhook-id
 ```
 
-`.env` 已被 Git 忽略。程序不会把完整 Webhook URL 输出到日志。
+`.env` 已加入 `.gitignore`，不会提交到 Git。旧版使用的 `WEBHOOK_URL` 暂时仍兼容，
+但建议改成 `CALL_WEBHOOK_URL`。
 
-### 网页环境变量覆盖
+可选变量：
 
-部署到 Railway 等平台后，无需终端，也无需修改 `config.yaml`。在服务的 Variables
-页面增加下面的变量即可覆盖 YAML 默认值：
-
-| 环境变量 | YAML 默认值 | 用途 |
+| 变量 | 默认值 | 用途 |
 |---|---:|---|
-| `CALL_WEBHOOK_URL` | 必填 | fwalert 私密 Webhook 地址 |
-| `WINDOW_SECONDS` | `120` | 滚动窗口秒数 |
-| `THRESHOLD_PCT` | `3.0` | 上涨/下跌触发百分比 |
-| `COOLDOWN_SECONDS` | `30` | 每个币种、每个方向的冷静期 |
-| `EVALUATION_INTERVAL_SECONDS` | `1` | 评估间隔 |
-| `MIN_POINTS` | `20` | 最少价格点数 |
-| `WARMUP_SECONDS` | `60` | 最短预热跨度 |
+| `WINDOW_SECONDS` | `120` | 滚动价格窗口 |
+| `THRESHOLD_PCT` | `3` | 基础档位；自动形成 3/6/9% 等档位 |
+| `COOLDOWN_SECONDS` | `30` | 每币种、每方向发送间隔 |
+| `EVALUATION_INTERVAL_SECONDS` | `1` | 波动评估间隔 |
+| `MIN_POINTS` | `20` | 预热所需最少成交数 |
+| `WARMUP_SECONDS` | `60` | 预热所需最短窗口跨度 |
 | `WEBHOOK_TIMEOUT_SECONDS` | `10` | 单次请求超时 |
 | `WEBHOOK_MAX_RETRIES` | `3` | 失败后的最大重试次数 |
 | `LOG_LEVEL` | `INFO` | 日志等级 |
+| `WS_PROXY_URL` | 空（强制直连） | 明确启用 WebSocket 代理 |
 
-环境变量的优先级高于 YAML。修改 Railway Variables 后应用 staged changes，平台会
-用新参数重新部署 Worker。
+默认连接时显式传入 `proxy=None`，所以 `HTTP_PROXY`、`HTTPS_PROXY` 等系统变量不会
+暗中让 Binance WebSocket 走代理。只有设置 `WS_PROXY_URL` 才会启用代理，代理地址
+不会输出到日志。Webhook 客户端同样不读取系统代理变量。
 
-## Webhook 行为
+## Webhook
 
-请求永远使用纯文本，不发送 JSON：
+请求使用：
 
 ```http
 Content-Type: text/plain; charset=utf-8
 ```
 
-失败后最多重试 3 次，总尝试次数最多 4 次，间隔为 1、2、4 秒。HTTP 429、5xx、
-网络错误和超时会重试；其他 4xx 直接失败。发送运行在独立队列 Worker 中，不会
-阻塞 Binance 行情接收。
+Webhook 发送在独立异步队列中，不阻塞行情接收。网络错误、超时、HTTP 429 和 5xx
+最多重试 3 次，总尝试最多 4 次，等待 1、2、4 秒；其他 4xx 不重试。日志永远不会
+输出完整 Webhook URL。
 
-fwalert 页面设置：
+fwalert 模板建议：
 
 ```text
 变量名：message
@@ -127,17 +108,14 @@ fwalert 页面设置：
 通知正文：{{message}}
 ```
 
-## 行情安全保护
+## 断线保护
 
-- WebSocket ping/pong 心跳；
-- 行情正常时每 30 秒输出一次三个币种的最新价格和窗口点数；
-- 任一币种超过 10 秒没有当前数据时清空窗口并重连；
-- 超过 10 秒的 Binance 旧事件拒绝处理；
-- 每次断线都清空全部窗口并重新预热；
-- 重连退避为 1、2、4、8、16、30 秒，之后保持 30 秒；
-- SIGINT/SIGTERM 优雅停止并尽量排空 Webhook 队列。
-
-因此 Binance 地区限制、代理错误或断线期间不会发送基于旧价格的提醒。
+- WebSocket 使用 ping/pong 心跳检测；
+- 任一币种超过 10 秒没有新成交，立即清空全部窗口；
+- 超过 10 秒的旧事件或异常时钟事件不会进入窗口；
+- Binance 主动断开或连接异常后按 1、2、4、8、16、30 秒退避重连；
+- 每次重新连接都从空窗口重新预热，不会根据断线前的旧价格提醒；
+- 收到 SIGINT/SIGTERM 时优雅停止，并尽量排空已入队的 Webhook。
 
 ## 本地运行
 
@@ -151,13 +129,13 @@ cp .env.example .env
 python main.py
 ```
 
-按 `Ctrl+C` 优雅停止。VS Code 可在“运行和调试”中选择
-`Binance Webhook Worker`。
+也可以在 VS Code 的“运行和调试”中选择 `Binance Webhook Worker`。按 `Ctrl+C`
+会优雅停止，并尽量排空已经入队的 Webhook。
 
-## 本地测试 Webhook
+### 本地测试 Webhook
 
-可把 `CALL_WEBHOOK_URL` 临时换成 [webhook.site](https://webhook.site/) 提供的接收
-地址，再通过环境变量临时降低触发门槛：
+建议把 `CALL_WEBHOOK_URL` 临时改成 [webhook.site](https://webhook.site/) 的接收地址，
+再在本地 `.env` 临时设置：
 
 ```env
 THRESHOLD_PCT=0.01
@@ -165,17 +143,17 @@ WARMUP_SECONDS=10
 MIN_POINTS=5
 ```
 
-启动后在 webhook.site 检查纯文本正文。测试完成后删除这些覆盖变量，恢复 YAML
-默认值。不要使用真实 fwalert 地址做高频测试，否则可能触发电话。
+在 webhook.site 查看收到的纯文本。测试结束后删除这三个临时变量。不要用真实
+fwalert 地址做低阈值测试，否则可能频繁触发电话。
 
-## Railway 后台 Worker
+## Railway 部署
 
-1. 从 GitHub 仓库部署服务；
+1. 从 GitHub 仓库创建后台 Worker；
 2. 在 Variables 页面设置并 Seal `CALL_WEBHOOK_URL`；
-3. Start Command 设置为 `python main.py`；
-4. 不生成域名；
-5. 不设置 Networking、`PORT` 或 Healthcheck；
-6. 关闭 Serverless/App Sleeping，保证 Worker 持续运行。
+3. Start Command 填写 `python main.py`；
+4. 不生成域名，不设置 Networking、`PORT` 或 Healthcheck；
+5. 关闭 Serverless/App Sleeping，保证 Worker 持续运行。
 
-如果 Binance WebSocket 返回 HTTP 403/451，请选择允许访问 Binance Futures 且符合
-当地法规及平台条款的部署地区。
+普通启动、连接成功、行情健康和发送成功日志写到 stdout，在 Railway 通常显示白色；
+断线、数据过期、重连和发送失败写到 stderr，显示红色。若出现 HTTP 403/451，日志会
+明确提示部署地区可能无法访问 Binance Futures，并确保不基于旧数据提醒。
