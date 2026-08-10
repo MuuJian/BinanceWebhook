@@ -14,10 +14,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 FIXED_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
-FIXED_WEBSOCKET_URL = (
-    "wss://fstream.binance.com/market/stream?streams="
-    "btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade"
-)
+BINANCE_COMBINED_STREAM_URL = "wss://fstream.binance.com/market/stream?streams="
 
 
 class ConfigError(ValueError):
@@ -46,6 +43,11 @@ class AppConfig:
     warmup_seconds: float
     webhook: WebhookConfig
     log_level: int
+
+
+def _websocket_url(symbols: tuple[str, ...]) -> str:
+    streams = "/".join(f"{symbol.lower()}@aggTrade" for symbol in symbols)
+    return f"{BINANCE_COMBINED_STREAM_URL}{streams}"
 
 
 def _positive_float(name: str, default: str) -> float:
@@ -138,7 +140,7 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
 
     return AppConfig(
         symbols=FIXED_SYMBOLS,
-        websocket_url=FIXED_WEBSOCKET_URL,
+        websocket_url=_websocket_url(FIXED_SYMBOLS),
         websocket_proxy=_proxy_url(),
         window_seconds=window_seconds,
         threshold_pct=threshold_pct,

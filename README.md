@@ -67,6 +67,12 @@ CALL_WEBHOOK_URL=https://你的-webhook-地址
 python main.py
 ```
 
+运行回归测试：
+
+```bash
+python -m unittest discover -v
+```
+
 ## 本地测试 Webhook
 
 为了避免测试时发送正式提醒，可以先使用 [webhook.site](https://webhook.site/) 的测试
