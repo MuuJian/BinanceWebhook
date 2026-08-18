@@ -12,7 +12,14 @@ from app.webhook import WebhookWorker
 
 
 def _alert() -> Alert:
-    return Alert("BTCUSDT", "up", 1, 3.2, "test alert")
+    return Alert(
+        symbol="BTCUSDT",
+        price=123456.78,
+        direction="up",
+        tier=1,
+        movement_pct=3.2,
+        message="test alert",
+    )
 
 
 class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -24,7 +31,7 @@ class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         return WebhookWorker(config, asyncio.Queue())
 
-    async def test_success_is_delivered_once_as_plain_text(self) -> None:
+    async def test_success_is_delivered_once_as_ticker_price_json(self) -> None:
         client = AsyncMock()
         client.post.return_value = httpx.Response(204)
 
@@ -32,8 +39,7 @@ class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         client.post.assert_awaited_once_with(
             "https://example.com/hook",
-            content=b"test alert",
-            headers={"Content-Type": "text/plain; charset=utf-8"},
+            json={"ticker": "BTCUSDT", "price": "123456.78"},
         )
 
     async def test_non_retryable_response_stops_immediately(self) -> None:

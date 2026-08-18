@@ -2,6 +2,15 @@
 
 这个程序会实时监控 Binance U 本位合约价格，并通过 Webhook 发送提醒。
 
+Webhook 请求体是 JSON，内容为触发提醒时的币种和当前价格：
+
+```json
+{
+  "ticker": "BTCUSDT",
+  "price": "65432.1"
+}
+```
+
 监控币种：
 
 - BTCUSDT

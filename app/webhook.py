@@ -1,4 +1,4 @@
-"""Non-blocking plain-text Webhook delivery with bounded retries."""
+"""Non-blocking JSON Webhook delivery with bounded retries."""
 
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ class WebhookWorker:
             try:
                 response = await client.post(
                     self.config.url,
-                    content=alert.message.encode("utf-8"),
-                    headers={"Content-Type": "text/plain; charset=utf-8"},
+                    json={
+                        "ticker": alert.symbol,
+                        "price": str(alert.price),
+                    },
                 )
                 if 200 <= response.status_code < 300:
                     logger.info(

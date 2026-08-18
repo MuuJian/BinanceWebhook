@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class Alert:
     symbol: str
+    price: float
     direction: str
     tier: int
     movement_pct: float
@@ -194,7 +195,14 @@ class AlertEngine:
             f"触发{next_threshold:g}%档提醒，当前价格{snapshot.current_price:g}，"
             f"参考价格{reference:g}"
         )
-        alert = Alert(symbol, direction, send_tier, movement, message)
+        alert = Alert(
+            symbol=symbol,
+            price=snapshot.current_price,
+            direction=direction,
+            tier=send_tier,
+            movement_pct=movement,
+            message=message,
+        )
         try:
             self.queue.put_nowait(alert)
         except asyncio.QueueFull:
