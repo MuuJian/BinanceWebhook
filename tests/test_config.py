@@ -26,25 +26,20 @@ class ConfigTests(unittest.TestCase):
             "wss://fstream.binance.com/market/stream?streams="
             "btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade",
         )
-        self.assertEqual(config.reset_pct, 2)
+        self.assertEqual(config.window_seconds, 120)
+        self.assertEqual(config.threshold_pct, 3)
+        self.assertEqual(config.cooldown_seconds, 30)
 
     def test_deployment_environment_wins_over_dotenv(self) -> None:
         config = self.load(THRESHOLD_PCT="6")
 
         self.assertEqual(config.threshold_pct, 6)
-        self.assertEqual(config.reset_pct, 4)
 
     def test_rejects_warmup_longer_than_window(self) -> None:
         with self.assertRaisesRegex(
             ConfigError, "WARMUP_SECONDS must not exceed WINDOW_SECONDS"
         ):
             self.load(WINDOW_SECONDS="30", WARMUP_SECONDS="31")
-
-    def test_rejects_reset_at_or_above_threshold(self) -> None:
-        with self.assertRaisesRegex(
-            ConfigError, "RESET_PCT must be less than THRESHOLD_PCT"
-        ):
-            self.load(THRESHOLD_PCT="3", RESET_PCT="3")
 
     def test_rejects_invalid_webhook_url(self) -> None:
         with self.assertRaisesRegex(ConfigError, "CALL_WEBHOOK_URL"):

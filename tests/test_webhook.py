@@ -16,9 +16,7 @@ def _alert() -> Alert:
         symbol="BTCUSDT",
         price=123456.78,
         direction="up",
-        tier=1,
         movement_pct=3.2,
-        message="test alert",
     )
 
 

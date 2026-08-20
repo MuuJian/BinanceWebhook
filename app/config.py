@@ -35,8 +35,6 @@ class AppConfig:
     websocket_proxy: str | None
     window_seconds: int
     threshold_pct: float
-    reset_pct: float
-    reset_confirm_seconds: float
     cooldown_seconds: float
     evaluation_interval_seconds: float
     min_points: int
@@ -130,13 +128,8 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
     window_seconds = _positive_int("WINDOW_SECONDS", "120")
     warmup_seconds = _positive_float("WARMUP_SECONDS", "60")
     threshold_pct = _positive_float("THRESHOLD_PCT", "3")
-    reset_pct = _positive_float(
-        "RESET_PCT", f"{threshold_pct * 2 / 3:.12g}"
-    )
     if warmup_seconds > window_seconds:
         raise ConfigError("WARMUP_SECONDS must not exceed WINDOW_SECONDS")
-    if reset_pct >= threshold_pct:
-        raise ConfigError("RESET_PCT must be less than THRESHOLD_PCT")
 
     return AppConfig(
         symbols=FIXED_SYMBOLS,
@@ -144,8 +137,6 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
         websocket_proxy=_proxy_url(),
         window_seconds=window_seconds,
         threshold_pct=threshold_pct,
-        reset_pct=reset_pct,
-        reset_confirm_seconds=_positive_float("RESET_CONFIRM_SECONDS", "10"),
         cooldown_seconds=_positive_float("COOLDOWN_SECONDS", "30"),
         evaluation_interval_seconds=_positive_float(
             "EVALUATION_INTERVAL_SECONDS", "1"

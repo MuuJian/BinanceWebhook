@@ -21,21 +21,21 @@ Webhook 请求体是 JSON，内容为触发提醒时的币种和当前价格：
 
 程序必须设置 `CALL_WEBHOOK_URL`用于接收提醒。
 
-监控规则可以通过下面五个设置修改：
+默认规则是：任意币种在最近 2 分钟内上涨或下跌达到 3% 时提醒一次。随后所有
+币种进入 30 秒提醒休眠期；休眠期间仍持续接收并记录价格，但不会发送任何提醒。
+30 秒结束后，程序立即使用最新的 2 分钟价格窗口重新判断，满足 3% 就再次提醒。
+
+监控规则可以通过下面三个设置修改：
 
 ```env
 WINDOW_SECONDS=120
 THRESHOLD_PCT=3
-RESET_PCT=2
-RESET_CONFIRM_SECONDS=10
 COOLDOWN_SECONDS=30
 ```
 
 - `WINDOW_SECONDS`：观察多少秒，默认 120 秒。
-- `THRESHOLD_PCT`：每一档波动百分比，默认 3，即 3%、6%、9%……
-- `RESET_PCT`：复位线，默认是档位的三分之二；3%档位时为 2%。
-- `RESET_CONFIRM_SECONDS`：连续处于复位线内多久才开始下一轮，默认 10 秒。
-- `COOLDOWN_SECONDS`：同币种同方向两次提醒的最短间隔，默认 30 秒。
+- `THRESHOLD_PCT`：触发提醒的波动百分比，默认 3。
+- `COOLDOWN_SECONDS`：任意提醒发出后的全局休眠时间，默认 30 秒。
 
 ## 查看是否正常
 

@@ -67,24 +67,19 @@ async def run_worker(config: AppConfig) -> None:
         store=store,
         queue=queue,
         threshold_pct=config.threshold_pct,
-        reset_pct=config.reset_pct,
-        reset_confirm_seconds=config.reset_confirm_seconds,
         cooldown_seconds=config.cooldown_seconds,
         evaluation_interval_seconds=config.evaluation_interval_seconds,
         min_points=config.min_points,
         warmup_seconds=config.warmup_seconds,
-        window_seconds=config.window_seconds,
     )
     webhook = WebhookWorker(config.webhook, queue)
 
     logger.info(
         "Worker started: symbols=%s window=%ss threshold=%g%% "
-        "reset=%g%%/%gs cooldown=%gs evaluation=%gs",
+        "global_cooldown=%gs evaluation=%gs",
         ",".join(config.symbols),
         config.window_seconds,
         config.threshold_pct,
-        config.reset_pct,
-        config.reset_confirm_seconds,
         config.cooldown_seconds,
         config.evaluation_interval_seconds,
     )
