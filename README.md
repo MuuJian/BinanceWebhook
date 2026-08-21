@@ -53,6 +53,15 @@ Binance aggTrade healthy
 普通运行日志通常是白色。断线、数据停止、自动重连或 Webhook 发送失败会显示红色。
 程序断线后会清空旧价格并重新连接，不会使用过期价格发送提醒。
 
+每次触发 CALL 时会先输出一条醒目的红色日志，例如：
+
+```text
+ERROR app.webhook: CALL triggered: ticker=BTCUSDT price=65432.1 direction=up movement=3.20%; sending Webhook
+```
+
+这条 `ERROR` 仅用于突出显示“已经触发”，不代表发送失败；随后出现
+`Webhook delivered` 才表示 Webhook 已成功接收。
+
 ## 本地运行
 
 需要 Python 3.11 或更新版本：

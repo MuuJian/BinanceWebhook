@@ -33,11 +33,17 @@ class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.post.return_value = httpx.Response(204)
 
-        await self.worker()._deliver(client, _alert())
+        with self.assertLogs("app.webhook", level="ERROR") as logs:
+            await self.worker()._deliver(client, _alert())
 
         client.post.assert_awaited_once_with(
             "https://example.com/hook",
             json={"ticker": "BTCUSDT", "price": "123456.78"},
+        )
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(
+            "CALL triggered: ticker=BTCUSDT price=123456.78",
+            logs.records[0].getMessage(),
         )
 
     async def test_non_retryable_response_stops_immediately(self) -> None:

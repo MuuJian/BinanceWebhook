@@ -33,6 +33,16 @@ class WebhookWorker:
                     self.queue.task_done()
 
     async def _deliver(self, client: httpx.AsyncClient, alert: Alert) -> None:
+        # This is intentionally ERROR-level so CALL activations are prominent
+        # in deployment logs. It describes a trigger, not a delivery failure.
+        logger.error(
+            "CALL triggered: ticker=%s price=%s direction=%s movement=%.2f%%; "
+            "sending Webhook",
+            alert.symbol,
+            alert.price,
+            alert.direction,
+            alert.movement_pct,
+        )
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
             try:
