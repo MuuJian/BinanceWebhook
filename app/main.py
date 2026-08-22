@@ -84,37 +84,34 @@ async def run_worker(config: AppConfig) -> None:
 
     store = PriceWindowStore(config.symbols, config.window_seconds)
     queue: asyncio.Queue[Alert] = asyncio.Queue(maxsize=100)
+    engine = AlertEngine(
+        symbols=config.symbols,
+        queue=queue,
+        threshold_pct=config.threshold_pct,
+        cooldown_seconds=config.cooldown_seconds,
+        window_seconds=config.window_seconds,
+    )
     receiver = BinanceAggTradeReceiver(
         websocket_url=config.websocket_url,
         websocket_proxy=config.websocket_proxy,
         symbols=config.symbols,
         store=store,
-    )
-    engine = AlertEngine(
-        symbols=config.symbols,
-        store=store,
-        queue=queue,
-        threshold_pct=config.threshold_pct,
-        cooldown_seconds=config.cooldown_seconds,
-        evaluation_interval_seconds=config.evaluation_interval_seconds,
-        window_seconds=config.window_seconds,
+        observer=engine,
     )
     webhook = WebhookWorker(config.webhook, queue)
 
     logger.info(
         "Worker started: symbols=%s anchor_window=%ss threshold=%g%% "
-        "global_cooldown=%gs evaluation=%gs",
+        "global_cooldown=%gs evaluation=every-trade",
         ",".join(config.symbols),
         config.window_seconds,
         config.threshold_pct,
         config.cooldown_seconds,
-        config.evaluation_interval_seconds,
     )
 
     market_task = asyncio.create_task(receiver.run(stop_event), name="market")
-    engine_task = asyncio.create_task(engine.run(stop_event), name="engine")
     webhook_task = asyncio.create_task(webhook.run(), name="webhook")
-    worker_tasks = {market_task, engine_task, webhook_task}
+    worker_tasks = {market_task, webhook_task}
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
     done, _ = await asyncio.wait(
         worker_tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED
@@ -122,8 +119,8 @@ async def run_worker(config: AppConfig) -> None:
     fatal_error = _background_failure(done, stop_task)
 
     stop_event.set()
-    logger.info("Shutdown requested; stopping market receiver and alert engine")
-    await asyncio.gather(market_task, engine_task, return_exceptions=True)
+    logger.info("Shutdown requested; stopping market receiver")
+    await asyncio.gather(market_task, return_exceptions=True)
     if fatal_error is None or not webhook_task.done():
         try:
             await asyncio.wait_for(queue.join(), timeout=15)

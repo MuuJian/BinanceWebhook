@@ -8,7 +8,7 @@ import logging
 import math
 import os
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from websockets.asyncio.client import connect
 
@@ -34,6 +34,16 @@ class StaleMarketData(ConnectionError):
     """Raised when the connection cannot provide current data for every symbol."""
 
 
+class TradeProcessingError(RuntimeError):
+    """Raised when accepted market data cannot be evaluated safely."""
+
+
+class TradeObserver(Protocol):
+    def observe(self, symbol: str, price: float, event_time_ms: int) -> None: ...
+
+    def reset_all(self) -> None: ...
+
+
 class BinanceAggTradeReceiver:
     def __init__(
         self,
@@ -42,12 +52,14 @@ class BinanceAggTradeReceiver:
         websocket_proxy: str | None,
         symbols: tuple[str, ...],
         store: PriceWindowStore,
+        observer: TradeObserver,
     ) -> None:
         self.websocket_url = websocket_url
         self.websocket_proxy = websocket_proxy
         self.symbols = symbols
         self._symbol_set = frozenset(symbols)
         self.store = store
+        self.observer = observer
 
     async def run(self, stop_event: asyncio.Event) -> None:
         failures = 0
@@ -100,7 +112,9 @@ class BinanceAggTradeReceiver:
                                     raise StaleMarketData(
                                         f"{symbol} event clock age={event_age_ms}ms"
                                     )
-                                if self.store.update(symbol, price, event_time_ms):
+                                if self._record_trade(
+                                    symbol, price, event_time_ms
+                                ):
                                     last_valid_at[symbol] = time.monotonic()
                                     if symbol not in first_seen:
                                         first_seen.add(symbol)
@@ -127,6 +141,8 @@ class BinanceAggTradeReceiver:
                             last_status_at = now
             except asyncio.CancelledError:
                 raise
+            except TradeProcessingError:
+                raise
             except StaleMarketData as exc:
                 logger.warning(
                     "Binance market data stale (%s); windows cleared before reconnect",
@@ -136,6 +152,7 @@ class BinanceAggTradeReceiver:
                 self._log_connection_error(exc)
             finally:
                 self.store.clear_all()
+                self.observer.reset_all()
 
             if stop_event.is_set():
                 break
@@ -180,6 +197,19 @@ class BinanceAggTradeReceiver:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.info("Ignoring malformed Binance message: %s", exc)
             return None
+
+    def _record_trade(
+        self, symbol: str, price: float, event_time_ms: int
+    ) -> bool:
+        if not self.store.update(symbol, price, event_time_ms):
+            return False
+        try:
+            self.observer.observe(symbol, price, event_time_ms)
+        except Exception as exc:
+            raise TradeProcessingError(
+                f"alert evaluation failed for {symbol}"
+            ) from exc
+        return True
 
     def _log_status(
         self, connected_at: float, last_valid_at: dict[str, float]

@@ -4,16 +4,23 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from app.market_stream import BinanceAggTradeReceiver, _reconnect_delay
+from app.market_stream import (
+    BinanceAggTradeReceiver,
+    TradeProcessingError,
+    _reconnect_delay,
+)
 
 
 class MarketMessageParsingTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.store = Mock()
+        self.observer = Mock()
         self.receiver = BinanceAggTradeReceiver(
             websocket_url="wss://example.com",
             websocket_proxy=None,
             symbols=("BTCUSDT",),
-            store=Mock(),
+            store=self.store,
+            observer=self.observer,
         )
 
     def test_parses_combined_stream_message(self) -> None:
@@ -73,6 +80,31 @@ class MarketMessageParsingTests(unittest.TestCase):
             [1, 2, 4, 8, 16, 30, 30],
         )
         self.assertEqual(_reconnect_delay(1_000_000), 30)
+
+    def test_accepted_trade_is_forwarded_immediately_to_observer(self) -> None:
+        self.store.update.return_value = True
+
+        accepted = self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
+
+        self.assertTrue(accepted)
+        self.observer.observe.assert_called_once_with(
+            "BTCUSDT", 20_400, 60_000
+        )
+
+    def test_out_of_order_trade_is_not_forwarded(self) -> None:
+        self.store.update.return_value = False
+
+        accepted = self.receiver._record_trade("BTCUSDT", 20_000, 59_999)
+
+        self.assertFalse(accepted)
+        self.observer.observe.assert_not_called()
+
+    def test_observer_failure_is_fatal_instead_of_silently_reconnecting(self) -> None:
+        self.store.update.return_value = True
+        self.observer.observe.side_effect = ValueError("boom")
+
+        with self.assertRaises(TradeProcessingError):
+            self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
 
 
 if __name__ == "__main__":

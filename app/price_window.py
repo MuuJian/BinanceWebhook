@@ -16,18 +16,9 @@ class _Bucket:
 
 @dataclass(frozen=True, slots=True)
 class WindowSnapshot:
-    generation: int
     current_price: float
-    latest_event_time_ms: int
     trade_count: int
     bucket_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class LatestPriceSnapshot:
-    generation: int
-    current_price: float
-    latest_event_time_ms: int
 
 
 class PriceWindow:
@@ -37,12 +28,10 @@ class PriceWindow:
         self.window_seconds = window_seconds
         self._buckets: deque[_Bucket] = deque()
         self._trade_count = 0
-        self.generation = 0
 
     def clear(self) -> None:
         self._buckets.clear()
         self._trade_count = 0
-        self.generation += 1
 
     def update(self, price: float, event_time_ms: int) -> bool:
         if self._buckets and event_time_ms < self._buckets[-1].last_time_ms:
@@ -74,23 +63,9 @@ class PriceWindow:
             return None
         latest = self._buckets[-1]
         return WindowSnapshot(
-            generation=self.generation,
             current_price=latest.close,
-            latest_event_time_ms=latest.last_time_ms,
             trade_count=self._trade_count,
             bucket_count=len(self._buckets),
-        )
-
-    def latest(self) -> LatestPriceSnapshot | None:
-        """Return the latest price in O(1) without scanning the whole window."""
-
-        if not self._buckets:
-            return None
-        latest = self._buckets[-1]
-        return LatestPriceSnapshot(
-            generation=self.generation,
-            current_price=latest.close,
-            latest_event_time_ms=latest.last_time_ms,
         )
 
 
@@ -105,12 +80,6 @@ class PriceWindowStore:
 
     def snapshot(self, symbol: str) -> WindowSnapshot | None:
         return self._windows[symbol].snapshot()
-
-    def latest(self, symbol: str) -> LatestPriceSnapshot | None:
-        return self._windows[symbol].latest()
-
-    def clear(self, symbol: str) -> None:
-        self._windows[symbol].clear()
 
     def clear_all(self) -> None:
         for window in self._windows.values():
