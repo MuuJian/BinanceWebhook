@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 FIXED_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 BINANCE_COMBINED_STREAM_URL = "wss://fstream.binance.com/market/stream?streams="
+MAX_WEBHOOK_RETRIES = 10
 
 
 class ConfigError(ValueError):
@@ -68,7 +69,9 @@ def _positive_int(name: str, default: str, *, minimum: int = 1) -> int:
     return value
 
 
-def _nonnegative_int(name: str, default: str) -> int:
+def _nonnegative_int(
+    name: str, default: str, *, maximum: int | None = None
+) -> int:
     raw = os.getenv(name, default).strip()
     try:
         value = int(raw)
@@ -76,6 +79,8 @@ def _nonnegative_int(name: str, default: str) -> int:
         raise ConfigError(f"{name} must be a non-negative integer") from exc
     if str(value) != raw or value < 0:
         raise ConfigError(f"{name} must be a non-negative integer")
+    if maximum is not None and value > maximum:
+        raise ConfigError(f"{name} must be no greater than {maximum}")
     return value
 
 
@@ -139,7 +144,9 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
         webhook=WebhookConfig(
             url=_webhook_url(),
             timeout_seconds=_positive_float("WEBHOOK_TIMEOUT_SECONDS", "10"),
-            max_retries=_nonnegative_int("WEBHOOK_MAX_RETRIES", "3"),
+            max_retries=_nonnegative_int(
+                "WEBHOOK_MAX_RETRIES", "3", maximum=MAX_WEBHOOK_RETRIES
+            ),
         ),
         log_level=_log_level(),
     )

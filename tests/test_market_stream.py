@@ -52,6 +52,20 @@ class MarketMessageParsingTests(unittest.TestCase):
                 )
             )
         )
+        self.assertIsNone(
+            self.receiver._parse_message(
+                json.dumps(
+                    {"data": {"e": "aggTrade", "E": True, "s": "BTCUSDT", "p": "1"}}
+                )
+            )
+        )
+        self.assertIsNone(
+            self.receiver._parse_message(
+                json.dumps(
+                    {"data": {"e": "aggTrade", "E": 1, "s": "BTCUSDT", "p": True}}
+                )
+            )
+        )
 
     def test_reconnect_backoff_is_bounded_for_huge_failure_counts(self) -> None:
         self.assertEqual(

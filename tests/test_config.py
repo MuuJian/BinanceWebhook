@@ -39,6 +39,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "CALL_WEBHOOK_URL"):
             self.load(CALL_WEBHOOK_URL="not-a-url")
 
+    def test_rejects_excessive_webhook_retries(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "no greater than 10"):
+            self.load(WEBHOOK_MAX_RETRIES="11")
+
     def test_legacy_webhook_variable_remains_supported(self) -> None:
         with patch.dict(
             os.environ, {"WEBHOOK_URL": "https://example.com/legacy"}, clear=True

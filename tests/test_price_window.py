@@ -6,7 +6,7 @@ from app.price_window import PriceWindow, PriceWindowStore
 
 
 class PriceWindowTests(unittest.TestCase):
-    def test_compacts_trades_and_preserves_extremes(self) -> None:
+    def test_compacts_trades_and_preserves_latest_price(self) -> None:
         window = PriceWindow(window_seconds=2)
 
         self.assertTrue(window.update(100, 1_000))
@@ -18,23 +18,20 @@ class PriceWindowTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
         self.assertEqual(snapshot.current_price, 101)
-        self.assertEqual(snapshot.highest_price, 105)
-        self.assertEqual(snapshot.lowest_price, 95)
-        self.assertEqual(snapshot.high_event_time_ms, 1_100)
-        self.assertEqual(snapshot.low_event_time_ms, 1_900)
         self.assertEqual(snapshot.trade_count, 4)
         self.assertEqual(snapshot.bucket_count, 2)
 
     def test_evicts_the_expired_second(self) -> None:
         window = PriceWindow(window_seconds=2)
         window.update(90, 1_999)
+        window.update(91, 1_999)
         window.update(100, 2_000)
         window.update(110, 3_000)
 
         snapshot = window.snapshot()
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual(snapshot.lowest_price, 100)
+        self.assertEqual(snapshot.current_price, 110)
         self.assertEqual(snapshot.trade_count, 2)
 
     def test_rejects_out_of_order_trade_without_mutating_window(self) -> None:
@@ -76,6 +73,7 @@ class PriceWindowTests(unittest.TestCase):
         self.assertIsNotNone(latest)
         assert before is not None and after is not None and latest is not None
         self.assertEqual(after.generation, before.generation + 1)
+        self.assertEqual(after.trade_count, 1)
         self.assertEqual(latest.generation, after.generation)
 
 

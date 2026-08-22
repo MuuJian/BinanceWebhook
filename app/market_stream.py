@@ -52,7 +52,6 @@ class BinanceAggTradeReceiver:
     async def run(self, stop_event: asyncio.Event) -> None:
         failures = 0
         while not stop_event.is_set():
-            self.store.clear_all()
             connected_at: float | None = None
             try:
                 proxy_mode = "configured" if self.websocket_proxy else "direct"
@@ -160,11 +159,21 @@ class BinanceAggTradeReceiver:
             data = message.get("data", message)
             if not isinstance(data, dict) or data.get("e") != "aggTrade":
                 return None
-            symbol = str(data["s"]).upper()
+            raw_symbol = data["s"]
+            raw_price = data["p"]
+            raw_event_time = data["E"]
+            if not isinstance(raw_symbol, str):
+                raise ValueError("invalid symbol")
+            if isinstance(raw_price, bool):
+                raise ValueError("invalid price")
+            if not isinstance(raw_event_time, int) or isinstance(raw_event_time, bool):
+                raise ValueError("invalid event time")
+
+            symbol = raw_symbol.upper()
             if symbol not in self._symbol_set:
                 return None
-            price = float(data["p"])
-            event_time_ms = int(data["E"])
+            price = float(raw_price)
+            event_time_ms = raw_event_time
             if not math.isfinite(price) or price <= 0 or event_time_ms <= 0:
                 raise ValueError("invalid price or event time")
             return symbol, price, event_time_ms

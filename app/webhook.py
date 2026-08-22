@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import httpx
 
@@ -16,7 +17,15 @@ MAX_RETRY_DELAY_SECONDS = 30
 _RETRY_EXPONENT_CAP = MAX_RETRY_DELAY_SECONDS.bit_length()
 
 
-def _retry_delay(attempt: int) -> int:
+def _retry_delay(attempt: int, retry_after: str | None = None) -> int:
+    if retry_after is not None:
+        try:
+            requested = float(retry_after)
+        except ValueError:
+            pass
+        else:
+            if math.isfinite(requested) and requested >= 0:
+                return min(max(1, math.ceil(requested)), MAX_RETRY_DELAY_SECONDS)
     exponent = min(attempt - 1, _RETRY_EXPONENT_CAP)
     return min(2**exponent, MAX_RETRY_DELAY_SECONDS)
 
@@ -53,6 +62,7 @@ class WebhookWorker:
         )
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            retry_after: str | None = None
             try:
                 response = await client.post(
                     self.config.url,
@@ -81,6 +91,7 @@ class WebhookWorker:
                     )
                     return
                 detail = f"HTTP {response.status_code}"
+                retry_after = response.headers.get("Retry-After")
             except httpx.RequestError as exc:
                 detail = type(exc).__name__
 
@@ -92,7 +103,7 @@ class WebhookWorker:
                     detail,
                 )
                 return
-            delay = _retry_delay(attempt)
+            delay = _retry_delay(attempt, retry_after)
             logger.warning(
                 "Webhook attempt failed: symbol=%s reason=%s; retrying in %ss",
                 alert.symbol,
