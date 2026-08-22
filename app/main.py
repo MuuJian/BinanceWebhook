@@ -11,7 +11,6 @@ from typing import Any
 from app.alert_engine import Alert, AlertEngine
 from app.config import AppConfig, ConfigError, load_config
 from app.market_stream import BinanceAggTradeReceiver
-from app.price_window import PriceWindowStore
 from app.webhook import WebhookWorker
 
 logger = logging.getLogger(__name__)
@@ -82,7 +81,6 @@ async def run_worker(config: AppConfig) -> None:
             except NotImplementedError:
                 pass
 
-    store = PriceWindowStore(config.symbols, config.window_seconds)
     queue: asyncio.Queue[Alert] = asyncio.Queue(maxsize=100)
     engine = AlertEngine(
         symbols=config.symbols,
@@ -95,7 +93,6 @@ async def run_worker(config: AppConfig) -> None:
         websocket_url=config.websocket_url,
         websocket_proxy=config.websocket_proxy,
         symbols=config.symbols,
-        store=store,
         observer=engine,
     )
     webhook = WebhookWorker(config.webhook, queue)

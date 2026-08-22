@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.market_stream import (
     BinanceAggTradeReceiver,
@@ -13,13 +13,11 @@ from app.market_stream import (
 
 class MarketMessageParsingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.store = Mock()
         self.observer = Mock()
         self.receiver = BinanceAggTradeReceiver(
             websocket_url="wss://example.com",
             websocket_proxy=None,
             symbols=("BTCUSDT",),
-            store=self.store,
             observer=self.observer,
         )
 
@@ -82,17 +80,19 @@ class MarketMessageParsingTests(unittest.TestCase):
         self.assertEqual(_reconnect_delay(1_000_000), 30)
 
     def test_accepted_trade_is_forwarded_immediately_to_observer(self) -> None:
-        self.store.update.return_value = True
-
         accepted = self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
 
         self.assertTrue(accepted)
         self.observer.observe.assert_called_once_with(
             "BTCUSDT", 20_400, 60_000
         )
+        state = self.receiver._states["BTCUSDT"]
+        self.assertEqual(state.current_price, 20_400)
+        self.assertEqual(state.trade_count, 1)
 
     def test_out_of_order_trade_is_not_forwarded(self) -> None:
-        self.store.update.return_value = False
+        self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
+        self.observer.reset_mock()
 
         accepted = self.receiver._record_trade("BTCUSDT", 20_000, 59_999)
 
@@ -100,11 +100,37 @@ class MarketMessageParsingTests(unittest.TestCase):
         self.observer.observe.assert_not_called()
 
     def test_observer_failure_is_fatal_instead_of_silently_reconnecting(self) -> None:
-        self.store.update.return_value = True
         self.observer.observe.side_effect = ValueError("boom")
 
         with self.assertRaises(TradeProcessingError):
             self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
+
+        state = self.receiver._states["BTCUSDT"]
+        self.assertIsNone(state.current_price)
+        self.assertEqual(state.trade_count, 0)
+
+    def test_reset_allows_fresh_lower_event_time_after_reconnect(self) -> None:
+        self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
+
+        self.receiver._reset_market_state()
+        accepted = self.receiver._record_trade("BTCUSDT", 20_000, 50_000)
+
+        self.assertTrue(accepted)
+        state = self.receiver._states["BTCUSDT"]
+        self.assertEqual(state.current_price, 20_000)
+        self.assertEqual(state.trade_count, 1)
+
+    def test_health_log_reports_constant_state_trade_count(self) -> None:
+        self.receiver._record_trade("BTCUSDT", 20_400, 60_000)
+        self.receiver._record_trade("BTCUSDT", 20_401, 60_001)
+
+        with patch("app.market_stream.time.monotonic", return_value=100):
+            with self.assertLogs("app.market_stream", level="INFO") as logs:
+                self.receiver._log_status(90, {"BTCUSDT": 99})
+
+        message = logs.records[0].getMessage()
+        self.assertIn("connected=10s", message)
+        self.assertIn("BTCUSDT=20401(trades=2,age=1.0s)", message)
 
 
 if __name__ == "__main__":

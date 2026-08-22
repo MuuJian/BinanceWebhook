@@ -8,11 +8,10 @@ import logging
 import math
 import os
 import time
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from websockets.asyncio.client import connect
-
-from app.price_window import PriceWindowStore
 
 logger = logging.getLogger(__name__)
 NO_DATA_TIMEOUT_SECONDS = 10
@@ -44,6 +43,13 @@ class TradeObserver(Protocol):
     def reset_all(self) -> None: ...
 
 
+@dataclass(slots=True)
+class _SymbolState:
+    current_price: float | None = None
+    latest_event_time_ms: int = 0
+    trade_count: int = 0
+
+
 class BinanceAggTradeReceiver:
     def __init__(
         self,
@@ -51,15 +57,15 @@ class BinanceAggTradeReceiver:
         websocket_url: str,
         websocket_proxy: str | None,
         symbols: tuple[str, ...],
-        store: PriceWindowStore,
         observer: TradeObserver,
     ) -> None:
         self.websocket_url = websocket_url
         self.websocket_proxy = websocket_proxy
         self.symbols = symbols
         self._symbol_set = frozenset(symbols)
-        self.store = store
         self.observer = observer
+        self._states: dict[str, _SymbolState] = {}
+        self._reset_market_state()
 
     async def run(self, stop_event: asyncio.Event) -> None:
         failures = 0
@@ -151,7 +157,7 @@ class BinanceAggTradeReceiver:
             except Exception as exc:
                 self._log_connection_error(exc)
             finally:
-                self.store.clear_all()
+                self._reset_market_state()
                 self.observer.reset_all()
 
             if stop_event.is_set():
@@ -201,7 +207,11 @@ class BinanceAggTradeReceiver:
     def _record_trade(
         self, symbol: str, price: float, event_time_ms: int
     ) -> bool:
-        if not self.store.update(symbol, price, event_time_ms):
+        state = self._states[symbol]
+        if (
+            state.current_price is not None
+            and event_time_ms < state.latest_event_time_ms
+        ):
             return False
         try:
             self.observer.observe(symbol, price, event_time_ms)
@@ -209,7 +219,13 @@ class BinanceAggTradeReceiver:
             raise TradeProcessingError(
                 f"alert evaluation failed for {symbol}"
             ) from exc
+        state.current_price = price
+        state.latest_event_time_ms = event_time_ms
+        state.trade_count += 1
         return True
+
+    def _reset_market_state(self) -> None:
+        self._states = {symbol: _SymbolState() for symbol in self.symbols}
 
     def _log_status(
         self, connected_at: float, last_valid_at: dict[str, float]
@@ -217,13 +233,13 @@ class BinanceAggTradeReceiver:
         now = time.monotonic()
         details: list[str] = []
         for symbol in self.symbols:
-            snapshot = self.store.snapshot(symbol)
-            if snapshot is None:
+            state = self._states[symbol]
+            if state.current_price is None:
                 details.append(f"{symbol}=warming-up")
                 continue
             details.append(
-                f"{symbol}={snapshot.current_price:g}"
-                f"(trades={snapshot.trade_count},buckets={snapshot.bucket_count},"
+                f"{symbol}={state.current_price:g}"
+                f"(trades={state.trade_count},"
                 f"age={now - last_valid_at[symbol]:.1f}s)"
             )
         logger.info(
