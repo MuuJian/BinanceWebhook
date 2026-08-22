@@ -8,6 +8,7 @@ from app.market_stream import (
     BinanceAggTradeReceiver,
     TradeProcessingError,
     _reconnect_delay,
+    _silent_symbols,
 )
 
 
@@ -78,6 +79,12 @@ class MarketMessageParsingTests(unittest.TestCase):
             [1, 2, 4, 8, 16, 30, 30],
         )
         self.assertEqual(_reconnect_delay(1_000_000), 30)
+
+    def test_silent_symbol_detection_uses_strict_timeout_boundary(self) -> None:
+        last_valid_at = {"BTCUSDT": 90, "ETHUSDT": 90.1}
+
+        self.assertEqual(_silent_symbols(last_valid_at, 100), [])
+        self.assertEqual(_silent_symbols(last_valid_at, 100.1), ["BTCUSDT"])
 
     def test_accepted_trade_is_forwarded_immediately_to_observer(self) -> None:
         accepted = self.receiver._record_trade("BTCUSDT", 20_400, 60_000)

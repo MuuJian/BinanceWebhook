@@ -15,6 +15,7 @@ from websockets.asyncio.client import connect
 
 logger = logging.getLogger(__name__)
 NO_DATA_TIMEOUT_SECONDS = 10
+HEALTH_CHECK_INTERVAL_SECONDS = 1
 STATUS_LOG_INTERVAL_SECONDS = 30
 MAX_EVENT_AGE_MS = 10_000
 MAX_RECONNECT_DELAY_SECONDS = 30
@@ -27,6 +28,14 @@ def _reconnect_delay(failures: int) -> int:
 
     exponent = min(failures, _RECONNECT_EXPONENT_CAP)
     return min(2**exponent, MAX_RECONNECT_DELAY_SECONDS)
+
+
+def _silent_symbols(last_valid_at: dict[str, float], now: float) -> list[str]:
+    return [
+        symbol
+        for symbol, last_seen in last_valid_at.items()
+        if now - last_seen > NO_DATA_TIMEOUT_SECONDS
+    ]
 
 
 class StaleMarketData(ConnectionError):
@@ -98,6 +107,9 @@ class BinanceAggTradeReceiver:
                     }
                     first_seen: set[str] = set()
                     last_status_at = connected_at
+                    next_health_check_at = (
+                        connected_at + HEALTH_CHECK_INTERVAL_SECONDS
+                    )
                     logger.info("Binance Futures WebSocket connected")
 
                     while not stop_event.is_set():
@@ -107,6 +119,7 @@ class BinanceAggTradeReceiver:
                             )
                         except asyncio.TimeoutError:
                             raw_message = None
+                        now = time.monotonic()
 
                         if raw_message is not None:
                             parsed = self._parse_message(raw_message)
@@ -121,7 +134,7 @@ class BinanceAggTradeReceiver:
                                 if self._record_trade(
                                     symbol, price, event_time_ms
                                 ):
-                                    last_valid_at[symbol] = time.monotonic()
+                                    last_valid_at[symbol] = now
                                     if symbol not in first_seen:
                                         first_seen.add(symbol)
                                         logger.info(
@@ -131,27 +144,23 @@ class BinanceAggTradeReceiver:
                                             price,
                                             event_age_ms,
                                         )
-
-                        now = time.monotonic()
-                        silent = [
-                            symbol
-                            for symbol, last_seen in last_valid_at.items()
-                            if now - last_seen > NO_DATA_TIMEOUT_SECONDS
-                        ]
-                        if silent:
-                            raise StaleMarketData(
-                                "no current data for " + ",".join(silent)
-                            )
-                        if now - last_status_at >= STATUS_LOG_INTERVAL_SECONDS:
-                            self._log_status(connected_at, last_valid_at)
-                            last_status_at = now
+                        if now >= next_health_check_at:
+                            silent = _silent_symbols(last_valid_at, now)
+                            if silent:
+                                raise StaleMarketData(
+                                    "no current data for " + ",".join(silent)
+                                )
+                            if now - last_status_at >= STATUS_LOG_INTERVAL_SECONDS:
+                                self._log_status(connected_at, last_valid_at)
+                                last_status_at = now
+                            next_health_check_at = now + HEALTH_CHECK_INTERVAL_SECONDS
             except asyncio.CancelledError:
                 raise
             except TradeProcessingError:
                 raise
             except StaleMarketData as exc:
                 logger.warning(
-                    "Binance market data stale (%s); windows cleared before reconnect",
+                    "Binance market data stale (%s); reconnecting with fresh state",
                     exc,
                 )
             except Exception as exc:
@@ -267,12 +276,12 @@ class BinanceAggTradeReceiver:
             return
         if self.websocket_proxy:
             logger.error(
-                "Binance WebSocket proxy connection failed (%s); windows cleared",
+                "Binance WebSocket proxy connection failed (%s); fresh reconnect",
                 type(exc).__name__,
             )
             return
         logger.error(
-            "Binance WebSocket disconnected or failed (%s: %s); windows cleared",
+            "Binance WebSocket disconnected or failed (%s: %s); fresh reconnect",
             type(exc).__name__,
             exc,
         )
