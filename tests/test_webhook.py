@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -98,6 +99,26 @@ class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_retry_delay(1_000_000), 30)
         self.assertEqual(_retry_delay(1, "2.2"), 3)
         self.assertEqual(_retry_delay(1, "not-a-number"), 1)
+
+    def test_retry_delay_supports_standard_http_date(self) -> None:
+        now = datetime(2026, 8, 22, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            _retry_delay(
+                1,
+                "Sat, 22 Aug 2026 00:00:12 GMT",
+                now=now,
+            ),
+            12,
+        )
+        self.assertEqual(
+            _retry_delay(
+                1,
+                "Sat, 22 Aug 2026 00:01:00 GMT",
+                now=now,
+            ),
+            30,
+        )
 
     async def test_network_error_exhausts_configured_attempts(self) -> None:
         client = AsyncMock()

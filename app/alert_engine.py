@@ -46,6 +46,7 @@ class AlertEngine:
         self.cooldown_seconds = cooldown_seconds
         self.window_ms = window_seconds * 1000
         self._cooldown_until = -math.inf
+        self._queue_blocked = False
         self._states = {symbol: _AnchorState() for symbol in symbols}
 
     def observe(self, symbol: str, price: float, event_time_ms: int) -> None:
@@ -85,23 +86,20 @@ class AlertEngine:
         if now < self._cooldown_until:
             return
 
-        pending = [
-            (symbol, state)
-            for symbol, state in self._states.items()
-            if state.pending_since_ms is not None
-            and state.current_price is not None
-        ]
-        if not pending:
+        selected: tuple[str, _AnchorState] | None = None
+        selected_key: tuple[int, float, str] | None = None
+        for symbol, state in self._states.items():
+            pending_since_ms = state.pending_since_ms
+            if pending_since_ms is None or state.current_price is None:
+                continue
+            key = (pending_since_ms, -state.movement_pct, symbol)
+            if selected_key is None or key < selected_key:
+                selected = (symbol, state)
+                selected_key = key
+        if selected is None:
             return
 
-        symbol, state = min(
-            pending,
-            key=lambda item: (
-                item[1].pending_since_ms,
-                -item[1].movement_pct,
-                item[0],
-            ),
-        )
+        symbol, state = selected
         assert state.current_price is not None
         alert = Alert(
             symbol=symbol,
@@ -112,8 +110,16 @@ class AlertEngine:
         try:
             self.queue.put_nowait(alert)
         except asyncio.QueueFull:
-            logger.error("Webhook queue is full; alert deferred for %s", symbol)
+            if not self._queue_blocked:
+                logger.error(
+                    "Webhook queue is full; alerts remain pending until it drains"
+                )
+                self._queue_blocked = True
             return
+
+        if self._queue_blocked:
+            logger.info("Webhook queue recovered; pending alert queued")
+            self._queue_blocked = False
 
         self._set_anchor(symbol, state, reason="alert triggered")
         self._cooldown_until = now + self.cooldown_seconds

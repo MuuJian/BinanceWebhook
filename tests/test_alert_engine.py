@@ -91,6 +91,18 @@ class AlertEngineAnchorTests(unittest.TestCase):
 
         self.assertEqual([alert.price for alert in self.alerts()], [20_502])
 
+    def test_alert_restarts_window_before_quiet_anchor_refresh(self) -> None:
+        self.initialize_anchors()
+        self.observe("BTCUSDT", 20_400, 60_000, 60)
+
+        self.observe("BTCUSDT", 20_500, 359_999, 359.999)
+        self.observe("BTCUSDT", 20_500, 360_000, 360)
+        self.observe("BTCUSDT", 20_808, 361_000, 361)
+        self.assertEqual([alert.price for alert in self.alerts()], [20_400])
+
+        self.observe("BTCUSDT", 20_910, 362_000, 362)
+        self.assertEqual([alert.price for alert in self.alerts()], [20_400, 20_910])
+
     def test_global_cooldown_defers_other_symbol_with_fixed_anchor(self) -> None:
         self.initialize_anchors()
         self.observe("BTCUSDT", 20_400, 60_000, 60)
@@ -158,6 +170,34 @@ class AlertEngineAnchorTests(unittest.TestCase):
         self.observe("BTCUSDT", 20_400, 90_000, 90)
 
         self.assertEqual([alert.symbol for alert in self.alerts()], ["BTCUSDT"])
+
+    def test_full_queue_logs_once_and_retries_pending_alert(self) -> None:
+        queue: asyncio.Queue[Alert] = asyncio.Queue(maxsize=1)
+        queue.put_nowait(Alert("ETHUSDT", 2_000, "up", 2))
+        engine = AlertEngine(
+            symbols=("BTCUSDT",),
+            queue=queue,
+            threshold_pct=2,
+            cooldown_seconds=30,
+            window_seconds=300,
+        )
+
+        with patch("app.alert_engine.time.monotonic", return_value=0):
+            engine.observe("BTCUSDT", 20_000, 0)
+        with self.assertLogs("app.alert_engine", level="ERROR") as logs:
+            with patch("app.alert_engine.time.monotonic", return_value=1):
+                engine.observe("BTCUSDT", 20_400, 1_000)
+                engine.observe("BTCUSDT", 20_500, 1_100)
+
+        self.assertEqual(len(logs.records), 1)
+        queue.get_nowait()
+        queue.task_done()
+        with patch("app.alert_engine.time.monotonic", return_value=2):
+            engine.observe("BTCUSDT", 20_500, 2_000)
+
+        queued = queue.get_nowait()
+        self.assertEqual(queued.symbol, "BTCUSDT")
+        self.assertEqual(queued.price, 20_500)
 
 
 if __name__ == "__main__":

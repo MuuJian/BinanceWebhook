@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -17,15 +19,28 @@ MAX_RETRY_DELAY_SECONDS = 30
 _RETRY_EXPONENT_CAP = MAX_RETRY_DELAY_SECONDS.bit_length()
 
 
-def _retry_delay(attempt: int, retry_after: str | None = None) -> int:
+def _retry_delay(
+    attempt: int,
+    retry_after: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> int:
+    requested: float | None = None
     if retry_after is not None:
         try:
             requested = float(retry_after)
         except ValueError:
-            pass
-        else:
-            if math.isfinite(requested) and requested >= 0:
-                return min(max(1, math.ceil(requested)), MAX_RETRY_DELAY_SECONDS)
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError, OverflowError):
+                requested = None
+            else:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                current = now or datetime.now(timezone.utc)
+                requested = (retry_at - current).total_seconds()
+    if requested is not None and math.isfinite(requested) and requested >= 0:
+        return min(max(1, math.ceil(requested)), MAX_RETRY_DELAY_SECONDS)
     exponent = min(attempt - 1, _RETRY_EXPONENT_CAP)
     return min(2**exponent, MAX_RETRY_DELAY_SECONDS)
 
