@@ -1,4 +1,4 @@
-"""Evaluate rolling price movement with a global alert cooldown."""
+"""Evaluate movement from fixed per-symbol anchors with a global cooldown."""
 
 from __future__ import annotations
 
@@ -21,6 +21,21 @@ class Alert:
     movement_pct: float
 
 
+@dataclass(slots=True)
+class _AnchorState:
+    generation: int = -1
+    price: float | None = None
+    event_time_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    symbol: str
+    snapshot: WindowSnapshot
+    direction: str
+    movement_pct: float
+
+
 class AlertEngine:
     def __init__(
         self,
@@ -31,8 +46,7 @@ class AlertEngine:
         threshold_pct: float,
         cooldown_seconds: float,
         evaluation_interval_seconds: float,
-        min_points: int,
-        warmup_seconds: float,
+        window_seconds: int,
     ) -> None:
         self.symbols = symbols
         self.store = store
@@ -40,9 +54,9 @@ class AlertEngine:
         self.threshold_pct = threshold_pct
         self.cooldown_seconds = cooldown_seconds
         self.evaluation_interval_seconds = evaluation_interval_seconds
-        self.min_points = min_points
-        self.warmup_seconds = warmup_seconds
+        self.window_ms = window_seconds * 1000
         self._cooldown_until = -math.inf
+        self._states = {symbol: _AnchorState() for symbol in symbols}
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
@@ -56,73 +70,91 @@ class AlertEngine:
 
     def evaluate_once(self) -> None:
         now = time.monotonic()
-        if now < self._cooldown_until:
-            return
+        candidates: list[_Candidate] = []
 
-        candidates: list[tuple[int, float, str, WindowSnapshot, str]] = []
         for symbol in self.symbols:
             snapshot = self.store.snapshot(symbol)
-            if not self._is_ready(snapshot):
+            if snapshot is None:
                 continue
-            assert snapshot is not None
 
-            candidate = self._movement_candidate(snapshot)
-            if candidate is None:
+            state = self._states[symbol]
+            if state.generation != snapshot.generation or state.price is None:
+                self._set_anchor(symbol, state, snapshot, reason="initialized")
                 continue
-            direction, movement, reference_time_ms = candidate
-            candidates.append(
-                (reference_time_ms, movement, symbol, snapshot, direction)
-            )
 
-        if not candidates:
+            direction, movement = self._movement(state.price, snapshot.current_price)
+            if movement >= self.threshold_pct:
+                candidates.append(
+                    _Candidate(symbol, snapshot, direction, movement)
+                )
+                continue
+
+            if snapshot.latest_event_time_ms - state.event_time_ms >= self.window_ms:
+                self._set_anchor(symbol, state, snapshot, reason="window expired")
+
+        # Anchor maintenance continues during cooldown, but calls stay paused.
+        if now < self._cooldown_until or not candidates:
             return
 
-        _, movement, symbol, snapshot, direction = max(candidates)
+        candidate = max(
+            candidates,
+            key=lambda item: (
+                item.snapshot.latest_event_time_ms,
+                item.movement_pct,
+            ),
+        )
         alert = Alert(
-            symbol=symbol,
-            price=snapshot.current_price,
-            direction=direction,
-            movement_pct=movement,
+            symbol=candidate.symbol,
+            price=candidate.snapshot.current_price,
+            direction=candidate.direction,
+            movement_pct=candidate.movement_pct,
         )
         try:
             self.queue.put_nowait(alert)
         except asyncio.QueueFull:
-            logger.error("Webhook queue is full; alert dropped for %s", symbol)
+            logger.error(
+                "Webhook queue is full; alert dropped for %s", candidate.symbol
+            )
             return
 
+        self._set_anchor(
+            candidate.symbol,
+            self._states[candidate.symbol],
+            candidate.snapshot,
+            reason="alert triggered",
+        )
         self._cooldown_until = now + self.cooldown_seconds
         logger.info(
             "Price alert queued: symbol=%s direction=%s movement=%.2f%%; "
             "all alerts paused for %gs",
-            symbol,
-            direction,
-            movement,
+            candidate.symbol,
+            candidate.direction,
+            candidate.movement_pct,
             self.cooldown_seconds,
         )
 
-    def _is_ready(self, snapshot: WindowSnapshot | None) -> bool:
-        return bool(
-            snapshot is not None
-            and snapshot.trade_count >= self.min_points
-            and snapshot.span_seconds >= self.warmup_seconds
-        )
+    @staticmethod
+    def _movement(anchor_price: float, current_price: float) -> tuple[str, float]:
+        if current_price >= anchor_price:
+            return "up", (current_price / anchor_price - 1) * 100
+        return "down", (1 - current_price / anchor_price) * 100
 
-    def _movement_candidate(
-        self, snapshot: WindowSnapshot
-    ) -> tuple[str, float, int] | None:
-        up_pct = (snapshot.current_price / snapshot.lowest_price - 1) * 100
-        down_pct = (1 - snapshot.current_price / snapshot.highest_price) * 100
-        candidates: list[tuple[str, float, int]] = []
-        if up_pct >= self.threshold_pct:
-            candidates.append(("up", up_pct, snapshot.low_event_time_ms))
-        if down_pct >= self.threshold_pct:
-            candidates.append(("down", down_pct, snapshot.high_event_time_ms))
-        if not candidates:
-            return None
-
-        # If both directions exceed the threshold, the more recent extreme
-        # describes the move that led to the current price.
-        direction, movement, reference_time_ms = max(
-            candidates, key=lambda item: (item[2], item[1])
+    @staticmethod
+    def _set_anchor(
+        symbol: str,
+        state: _AnchorState,
+        snapshot: WindowSnapshot,
+        *,
+        reason: str,
+    ) -> None:
+        previous_price = state.price
+        state.generation = snapshot.generation
+        state.price = snapshot.current_price
+        state.event_time_ms = snapshot.latest_event_time_ms
+        logger.info(
+            "Price anchor updated: symbol=%s previous=%s current=%g reason=%s",
+            symbol,
+            "none" if previous_price is None else f"{previous_price:g}",
+            snapshot.current_price,
+            reason,
         )
-        return direction, movement, reference_time_ms

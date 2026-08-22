@@ -69,13 +69,12 @@ async def run_worker(config: AppConfig) -> None:
         threshold_pct=config.threshold_pct,
         cooldown_seconds=config.cooldown_seconds,
         evaluation_interval_seconds=config.evaluation_interval_seconds,
-        min_points=config.min_points,
-        warmup_seconds=config.warmup_seconds,
+        window_seconds=config.window_seconds,
     )
     webhook = WebhookWorker(config.webhook, queue)
 
     logger.info(
-        "Worker started: symbols=%s window=%ss threshold=%g%% "
+        "Worker started: symbols=%s anchor_window=%ss threshold=%g%% "
         "global_cooldown=%gs evaluation=%gs",
         ",".join(config.symbols),
         config.window_seconds,

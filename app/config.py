@@ -37,8 +37,6 @@ class AppConfig:
     threshold_pct: float
     cooldown_seconds: float
     evaluation_interval_seconds: float
-    min_points: int
-    warmup_seconds: float
     webhook: WebhookConfig
     log_level: int
 
@@ -126,10 +124,7 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
 
     load_dotenv(env_path, override=False)
     window_seconds = _positive_int("WINDOW_SECONDS", "120")
-    warmup_seconds = _positive_float("WARMUP_SECONDS", "60")
     threshold_pct = _positive_float("THRESHOLD_PCT", "3")
-    if warmup_seconds > window_seconds:
-        raise ConfigError("WARMUP_SECONDS must not exceed WINDOW_SECONDS")
 
     return AppConfig(
         symbols=FIXED_SYMBOLS,
@@ -141,8 +136,6 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
         evaluation_interval_seconds=_positive_float(
             "EVALUATION_INTERVAL_SECONDS", "1"
         ),
-        min_points=_positive_int("MIN_POINTS", "20", minimum=2),
-        warmup_seconds=warmup_seconds,
         webhook=WebhookConfig(
             url=_webhook_url(),
             timeout_seconds=_positive_float("WEBHOOK_TIMEOUT_SECONDS", "10"),

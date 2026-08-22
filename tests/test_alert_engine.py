@@ -9,48 +9,24 @@ from app.price_window import WindowSnapshot
 
 
 def _snapshot(
-    *,
     current: float,
-    high: float,
-    low: float,
-    high_time_ms: int = 1_000,
-    low_time_ms: int = 1_000,
+    event_time_ms: int,
+    *,
+    generation: int = 0,
     trade_count: int = 20,
     span_seconds: float = 60,
 ) -> WindowSnapshot:
     return WindowSnapshot(
-        generation=0,
+        generation=generation,
         current_price=current,
-        highest_price=high,
-        lowest_price=low,
-        high_event_time_ms=high_time_ms,
-        low_event_time_ms=low_time_ms,
-        latest_event_time_ms=2_000,
+        highest_price=current,
+        lowest_price=current,
+        high_event_time_ms=event_time_ms,
+        low_event_time_ms=event_time_ms,
+        latest_event_time_ms=event_time_ms,
         trade_count=trade_count,
         bucket_count=20,
         span_seconds=span_seconds,
-    )
-
-
-def _down(movement_pct: float) -> WindowSnapshot:
-    high = 100.0
-    return _snapshot(
-        current=high * (1 - movement_pct / 100),
-        high=high,
-        low=high * (1 - movement_pct / 100),
-        high_time_ms=1_000,
-        low_time_ms=2_000,
-    )
-
-
-def _up(movement_pct: float) -> WindowSnapshot:
-    low = 100.0
-    return _snapshot(
-        current=low * (1 + movement_pct / 100),
-        high=low * (1 + movement_pct / 100),
-        low=low,
-        high_time_ms=2_000,
-        low_time_ms=1_000,
     )
 
 
@@ -62,128 +38,151 @@ class _SnapshotStore:
         return self.snapshots.get(symbol)
 
 
-class AlertEngineCooldownTests(unittest.TestCase):
+class AlertEngineAnchorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.queue: asyncio.Queue[Alert] = asyncio.Queue()
         self.store = _SnapshotStore(
-            {"BTCUSDT": _down(0), "ETHUSDT": _down(0)}
+            {
+                "BTCUSDT": _snapshot(20_000, 0),
+                "ETHUSDT": _snapshot(2_000, 0),
+            }
         )
         self.engine = AlertEngine(
             symbols=("BTCUSDT", "ETHUSDT"),
             store=self.store,
             queue=self.queue,
-            threshold_pct=3,
+            threshold_pct=2,
             cooldown_seconds=30,
             evaluation_interval_seconds=1,
-            min_points=20,
-            warmup_seconds=60,
+            window_seconds=300,
         )
 
     def evaluate(self, now: float) -> None:
         with patch("app.alert_engine.time.monotonic", return_value=now):
             self.engine.evaluate_once()
 
+    def set_price(
+        self,
+        symbol: str,
+        price: float,
+        event_time_ms: int,
+        *,
+        generation: int = 0,
+    ) -> None:
+        self.store.snapshots[symbol] = _snapshot(
+            price, event_time_ms, generation=generation
+        )
+
     def alerts(self) -> list[Alert]:
         return list(self.queue._queue)
 
-    def test_below_three_percent_does_not_alert(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _down(2.99)
+    def initialize_anchors(self) -> None:
+        self.evaluate(0)
 
+    def test_first_ready_price_only_initializes_anchor(self) -> None:
         self.evaluate(0)
 
         self.assertEqual(self.alerts(), [])
 
-    def test_exactly_three_percent_triggers_alert(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _down(3)
+    def test_two_percent_move_alerts_and_becomes_new_anchor(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 60_000)
 
-        self.evaluate(0)
+        self.evaluate(60)
+        self.evaluate(90)
 
         self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.alerts()[0].price, 20_400)
 
-    def test_same_three_percent_move_can_alert_again_after_thirty_seconds(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _down(3.2)
+    def test_next_two_percent_is_measured_from_trigger_price(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 60_000)
+        self.evaluate(60)
 
-        self.evaluate(0)
-        self.evaluate(29.999)
-        self.evaluate(30)
+        self.set_price("BTCUSDT", 20_808, 90_000)
+        self.evaluate(90)
+
+        self.assertEqual([alert.price for alert in self.alerts()], [20_400, 20_808])
+
+    def test_two_percent_drop_from_anchor_triggers_down_alert(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 19_600, 60_000)
+
+        self.evaluate(60)
+
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.alerts()[0].direction, "down")
+        self.assertAlmostEqual(self.alerts()[0].movement_pct, 2)
+
+    def test_anchor_stays_fixed_before_window_expires(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_100, 100_000)
+        self.evaluate(100)
+        self.set_price("BTCUSDT", 20_400, 299_999)
+
+        self.evaluate(299.999)
+
+        self.assertEqual([alert.price for alert in self.alerts()], [20_400])
+
+    def test_quiet_window_refreshes_anchor_to_latest_price(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_100, 300_000)
+        self.evaluate(300)
+
+        self.set_price("BTCUSDT", 20_501, 301_000)
+        self.evaluate(301)
+        self.assertEqual(self.alerts(), [])
+
+        self.set_price("BTCUSDT", 20_502, 302_000)
+        self.evaluate(302)
+        self.assertEqual([alert.price for alert in self.alerts()], [20_502])
+
+    def test_global_cooldown_suppresses_other_symbol_but_keeps_its_anchor(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 60_000)
+        self.evaluate(60)
+
+        self.set_price("ETHUSDT", 2_040, 70_000)
+        self.evaluate(70)
+        self.evaluate(90)
 
         self.assertEqual(
             [alert.symbol for alert in self.alerts()],
-            ["BTCUSDT", "BTCUSDT"],
+            ["BTCUSDT", "ETHUSDT"],
         )
 
-    def test_cooldown_suppresses_all_symbols_and_directions(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _down(3.2)
-        self.evaluate(0)
-
-        self.store.snapshots["BTCUSDT"] = _down(0)
-        self.store.snapshots["ETHUSDT"] = _up(4)
+    def test_quiet_anchor_refresh_continues_during_global_cooldown(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 300_000)
         self.evaluate(10)
-        self.evaluate(30)
 
-        self.assertEqual(
-            [(alert.symbol, alert.direction) for alert in self.alerts()],
-            [("BTCUSDT", "down"), ("ETHUSDT", "up")],
-        )
+        self.set_price("ETHUSDT", 2_010, 300_000)
+        self.evaluate(20)
+        self.set_price("ETHUSDT", 2_050, 301_000)
+        self.evaluate(40)
 
-    def test_latest_price_collected_during_cooldown_is_used_after_wakeup(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _down(3.2)
-        self.evaluate(0)
+        self.assertEqual([alert.symbol for alert in self.alerts()], ["BTCUSDT"])
 
-        # Market data collection is independent of alert evaluation, so the
-        # latest rolling snapshot can keep changing during the cooldown.
-        self.store.snapshots["BTCUSDT"] = _up(4.5)
-        self.evaluate(15)
-        self.evaluate(30)
+    def test_reconnect_generation_resets_anchor_without_alerting(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 30_000, 60_000, generation=1)
 
-        alerts = self.alerts()
-        self.assertEqual(len(alerts), 2)
-        self.assertEqual(alerts[1].direction, "up")
-        self.assertEqual(alerts[1].price, 104.5)
-
-    def test_not_enough_history_does_not_alert(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _snapshot(
-            current=104,
-            high=104,
-            low=100,
-            trade_count=19,
-            span_seconds=59,
-        )
-
-        self.evaluate(0)
+        self.evaluate(60)
 
         self.assertEqual(self.alerts(), [])
 
-    def test_more_recent_extreme_selects_direction_when_both_qualify(self) -> None:
+    def test_first_trade_can_be_anchor_for_first_minute_move(self) -> None:
         self.store.snapshots["BTCUSDT"] = _snapshot(
-            current=100,
-            high=105,
-            low=95,
-            high_time_ms=2_000,
-            low_time_ms=1_000,
+            20_000, 0, trade_count=1, span_seconds=0
         )
-
         self.evaluate(0)
-
-        self.assertEqual(self.alerts()[0].direction, "down")
-
-    def test_most_recent_qualifying_move_wins_across_symbols(self) -> None:
         self.store.snapshots["BTCUSDT"] = _snapshot(
-            current=104,
-            high=104,
-            low=100,
-            low_time_ms=1_000,
-        )
-        self.store.snapshots["ETHUSDT"] = _snapshot(
-            current=96,
-            high=100,
-            low=96,
-            high_time_ms=2_000,
+            20_400, 60_000, trade_count=2, span_seconds=60
         )
 
-        self.evaluate(0)
+        self.evaluate(60)
 
-        self.assertEqual(self.alerts()[0].symbol, "ETHUSDT")
+        self.assertEqual([alert.price for alert in self.alerts()], [20_400])
 
 
 if __name__ == "__main__":

@@ -35,12 +35,6 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.threshold_pct, 6)
 
-    def test_rejects_warmup_longer_than_window(self) -> None:
-        with self.assertRaisesRegex(
-            ConfigError, "WARMUP_SECONDS must not exceed WINDOW_SECONDS"
-        ):
-            self.load(WINDOW_SECONDS="30", WARMUP_SECONDS="31")
-
     def test_rejects_invalid_webhook_url(self) -> None:
         with self.assertRaisesRegex(ConfigError, "CALL_WEBHOOK_URL"):
             self.load(CALL_WEBHOOK_URL="not-a-url")
