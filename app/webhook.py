@@ -11,6 +11,14 @@ from app.alert_engine import Alert
 from app.config import WebhookConfig
 
 logger = logging.getLogger(__name__)
+RETRYABLE_STATUS_CODES = frozenset({408, 425, 429})
+MAX_RETRY_DELAY_SECONDS = 30
+_RETRY_EXPONENT_CAP = MAX_RETRY_DELAY_SECONDS.bit_length()
+
+
+def _retry_delay(attempt: int) -> int:
+    exponent = min(attempt - 1, _RETRY_EXPONENT_CAP)
+    return min(2**exponent, MAX_RETRY_DELAY_SECONDS)
 
 
 class WebhookWorker:
@@ -62,7 +70,8 @@ class WebhookWorker:
                     )
                     return
                 retryable = (
-                    response.status_code == 429 or response.status_code >= 500
+                    response.status_code in RETRYABLE_STATUS_CODES
+                    or response.status_code >= 500
                 )
                 if not retryable:
                     logger.error(
@@ -83,7 +92,7 @@ class WebhookWorker:
                     detail,
                 )
                 return
-            delay = 2 ** (attempt - 1)
+            delay = _retry_delay(attempt)
             logger.warning(
                 "Webhook attempt failed: symbol=%s reason=%s; retrying in %ss",
                 alert.symbol,

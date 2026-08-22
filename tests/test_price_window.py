@@ -48,6 +48,18 @@ class PriceWindowTests(unittest.TestCase):
         self.assertEqual(snapshot.current_price, 100)
         self.assertEqual(snapshot.trade_count, 1)
 
+    def test_latest_snapshot_is_lightweight_and_tracks_last_trade(self) -> None:
+        window = PriceWindow(window_seconds=10)
+        window.update(100, 1_000)
+        window.update(101, 1_100)
+
+        latest = window.latest()
+
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(latest.current_price, 101)
+        self.assertEqual(latest.latest_event_time_ms, 1_100)
+
     def test_clear_increments_generation(self) -> None:
         store = PriceWindowStore(("BTCUSDT",), window_seconds=10)
         store.update("BTCUSDT", 100, 1_000)
@@ -56,11 +68,15 @@ class PriceWindowTests(unittest.TestCase):
 
         store.clear_all()
         self.assertIsNone(store.snapshot("BTCUSDT"))
+        self.assertIsNone(store.latest("BTCUSDT"))
         store.update("BTCUSDT", 101, 2_000)
         after = store.snapshot("BTCUSDT")
+        latest = store.latest("BTCUSDT")
         self.assertIsNotNone(after)
-        assert before is not None and after is not None
+        self.assertIsNotNone(latest)
+        assert before is not None and after is not None and latest is not None
         self.assertEqual(after.generation, before.generation + 1)
+        self.assertEqual(latest.generation, after.generation)
 
 
 if __name__ == "__main__":

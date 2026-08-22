@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.alert_engine import Alert, AlertEngine
-from app.price_window import WindowSnapshot
+from app.price_window import LatestPriceSnapshot
 
 
 def _snapshot(
@@ -13,28 +13,19 @@ def _snapshot(
     event_time_ms: int,
     *,
     generation: int = 0,
-    trade_count: int = 20,
-    span_seconds: float = 60,
-) -> WindowSnapshot:
-    return WindowSnapshot(
+) -> LatestPriceSnapshot:
+    return LatestPriceSnapshot(
         generation=generation,
         current_price=current,
-        highest_price=current,
-        lowest_price=current,
-        high_event_time_ms=event_time_ms,
-        low_event_time_ms=event_time_ms,
         latest_event_time_ms=event_time_ms,
-        trade_count=trade_count,
-        bucket_count=20,
-        span_seconds=span_seconds,
     )
 
 
 class _SnapshotStore:
-    def __init__(self, snapshots: dict[str, WindowSnapshot]) -> None:
+    def __init__(self, snapshots: dict[str, LatestPriceSnapshot]) -> None:
         self.snapshots = snapshots
 
-    def snapshot(self, symbol: str) -> WindowSnapshot | None:
+    def latest(self, symbol: str) -> LatestPriceSnapshot | None:
         return self.snapshots.get(symbol)
 
 
@@ -172,17 +163,39 @@ class AlertEngineAnchorTests(unittest.TestCase):
         self.assertEqual(self.alerts(), [])
 
     def test_first_trade_can_be_anchor_for_first_minute_move(self) -> None:
-        self.store.snapshots["BTCUSDT"] = _snapshot(
-            20_000, 0, trade_count=1, span_seconds=0
-        )
+        self.store.snapshots["BTCUSDT"] = _snapshot(20_000, 0)
         self.evaluate(0)
-        self.store.snapshots["BTCUSDT"] = _snapshot(
-            20_400, 60_000, trade_count=2, span_seconds=60
-        )
+        self.store.snapshots["BTCUSDT"] = _snapshot(20_400, 60_000)
 
         self.evaluate(60)
 
         self.assertEqual([alert.price for alert in self.alerts()], [20_400])
+
+    def test_oldest_pending_symbol_is_not_starved(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 100_000)
+        self.set_price("ETHUSDT", 2_040, 90_000)
+
+        self.evaluate(100)
+        self.evaluate(130)
+
+        self.assertEqual(
+            [alert.symbol for alert in self.alerts()],
+            ["ETHUSDT", "BTCUSDT"],
+        )
+
+    def test_pending_move_clears_if_price_returns_during_cooldown(self) -> None:
+        self.initialize_anchors()
+        self.set_price("BTCUSDT", 20_400, 60_000)
+        self.evaluate(60)
+
+        self.set_price("ETHUSDT", 2_040, 70_000)
+        self.evaluate(70)
+        self.set_price("ETHUSDT", 2_010, 80_000)
+        self.evaluate(80)
+        self.evaluate(90)
+
+        self.assertEqual([alert.symbol for alert in self.alerts()], ["BTCUSDT"])
 
 
 if __name__ == "__main__":

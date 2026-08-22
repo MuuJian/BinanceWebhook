@@ -33,6 +33,13 @@ class WindowSnapshot:
     span_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class LatestPriceSnapshot:
+    generation: int
+    current_price: float
+    latest_event_time_ms: int
+
+
 class PriceWindow:
     """A price window that retains OHLC extremes without retaining every trade."""
 
@@ -100,6 +107,18 @@ class PriceWindow:
             span_seconds=max(0.0, (latest.last_time_ms - first_event_ms) / 1000),
         )
 
+    def latest(self) -> LatestPriceSnapshot | None:
+        """Return the latest price in O(1) without scanning the whole window."""
+
+        if not self._buckets:
+            return None
+        latest = self._buckets[-1]
+        return LatestPriceSnapshot(
+            generation=self.generation,
+            current_price=latest.close,
+            latest_event_time_ms=latest.last_time_ms,
+        )
+
 
 class PriceWindowStore:
     def __init__(self, symbols: tuple[str, ...], window_seconds: int) -> None:
@@ -112,6 +131,9 @@ class PriceWindowStore:
 
     def snapshot(self, symbol: str) -> WindowSnapshot | None:
         return self._windows[symbol].snapshot()
+
+    def latest(self, symbol: str) -> LatestPriceSnapshot | None:
+        return self._windows[symbol].latest()
 
     def clear(self, symbol: str) -> None:
         self._windows[symbol].clear()

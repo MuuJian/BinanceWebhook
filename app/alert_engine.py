@@ -7,10 +7,15 @@ import logging
 import math
 import time
 from dataclasses import dataclass
+from typing import Protocol
 
-from app.price_window import PriceWindowStore, WindowSnapshot
+from app.price_window import LatestPriceSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+class PriceSource(Protocol):
+    def latest(self, symbol: str) -> LatestPriceSnapshot | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,14 +31,16 @@ class _AnchorState:
     generation: int = -1
     price: float | None = None
     event_time_ms: int = 0
+    pending_since_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     symbol: str
-    snapshot: WindowSnapshot
+    snapshot: LatestPriceSnapshot
     direction: str
     movement_pct: float
+    pending_since_ms: int
 
 
 class AlertEngine:
@@ -41,7 +48,7 @@ class AlertEngine:
         self,
         *,
         symbols: tuple[str, ...],
-        store: PriceWindowStore,
+        store: PriceSource,
         queue: asyncio.Queue[Alert],
         threshold_pct: float,
         cooldown_seconds: float,
@@ -73,7 +80,7 @@ class AlertEngine:
         candidates: list[_Candidate] = []
 
         for symbol in self.symbols:
-            snapshot = self.store.snapshot(symbol)
+            snapshot = self.store.latest(symbol)
             if snapshot is None:
                 continue
 
@@ -84,11 +91,20 @@ class AlertEngine:
 
             direction, movement = self._movement(state.price, snapshot.current_price)
             if movement >= self.threshold_pct:
+                if state.pending_since_ms is None:
+                    state.pending_since_ms = snapshot.latest_event_time_ms
                 candidates.append(
-                    _Candidate(symbol, snapshot, direction, movement)
+                    _Candidate(
+                        symbol,
+                        snapshot,
+                        direction,
+                        movement,
+                        state.pending_since_ms,
+                    )
                 )
                 continue
 
+            state.pending_since_ms = None
             if snapshot.latest_event_time_ms - state.event_time_ms >= self.window_ms:
                 self._set_anchor(symbol, state, snapshot, reason="window expired")
 
@@ -96,11 +112,12 @@ class AlertEngine:
         if now < self._cooldown_until or not candidates:
             return
 
-        candidate = max(
+        candidate = min(
             candidates,
             key=lambda item: (
-                item.snapshot.latest_event_time_ms,
-                item.movement_pct,
+                item.pending_since_ms,
+                -item.movement_pct,
+                item.symbol,
             ),
         )
         alert = Alert(
@@ -143,7 +160,7 @@ class AlertEngine:
     def _set_anchor(
         symbol: str,
         state: _AnchorState,
-        snapshot: WindowSnapshot,
+        snapshot: LatestPriceSnapshot,
         *,
         reason: str,
     ) -> None:
@@ -151,6 +168,7 @@ class AlertEngine:
         state.generation = snapshot.generation
         state.price = snapshot.current_price
         state.event_time_ms = snapshot.latest_event_time_ms
+        state.pending_since_ms = None
         logger.info(
             "Price anchor updated: symbol=%s previous=%s current=%g reason=%s",
             symbol,

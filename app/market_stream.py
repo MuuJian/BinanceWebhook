@@ -20,6 +20,14 @@ STATUS_LOG_INTERVAL_SECONDS = 30
 MAX_EVENT_AGE_MS = 10_000
 MAX_RECONNECT_DELAY_SECONDS = 30
 STABLE_CONNECTION_SECONDS = 60
+_RECONNECT_EXPONENT_CAP = MAX_RECONNECT_DELAY_SECONDS.bit_length()
+
+
+def _reconnect_delay(failures: int) -> int:
+    """Return bounded exponential backoff without growing huge integers."""
+
+    exponent = min(failures, _RECONNECT_EXPONENT_CAP)
+    return min(2**exponent, MAX_RECONNECT_DELAY_SECONDS)
 
 
 class StaleMarketData(ConnectionError):
@@ -137,8 +145,8 @@ class BinanceAggTradeReceiver:
                 and time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS
             ):
                 failures = 0
-            delay = min(2**failures, MAX_RECONNECT_DELAY_SECONDS)
-            failures += 1
+            delay = _reconnect_delay(failures)
+            failures = min(failures + 1, _RECONNECT_EXPONENT_CAP)
             logger.warning("Reconnecting to Binance in %ss", delay)
             await self._wait_or_stop(stop_event, delay)
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
+from typing import Any
 
 from app.alert_engine import Alert, AlertEngine
 from app.config import AppConfig, ConfigError, load_config
@@ -19,6 +20,33 @@ logger = logging.getLogger(__name__)
 class _BelowWarning(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return record.levelno < logging.WARNING
+
+
+def _background_failure(
+    done: set[asyncio.Task[Any]], stop_task: asyncio.Task[Any]
+) -> BaseException | None:
+    """Return a real worker failure without misclassifying graceful shutdown."""
+
+    stop_requested = stop_task in done
+    cancelled_task: asyncio.Task[Any] | None = None
+    completed_task: asyncio.Task[Any] | None = None
+    for task in done:
+        if task is stop_task:
+            continue
+        if task.cancelled():
+            cancelled_task = task
+            continue
+        exception = task.exception()
+        if exception is not None:
+            return exception
+        completed_task = task
+    if stop_requested:
+        return None
+    if cancelled_task is not None:
+        return RuntimeError(f"{cancelled_task.get_name()} task was cancelled")
+    if completed_task is not None:
+        return RuntimeError(f"{completed_task.get_name()} task stopped unexpectedly")
+    return None
 
 
 def configure_logging(level: int) -> None:
@@ -91,17 +119,7 @@ async def run_worker(config: AppConfig) -> None:
     done, _ = await asyncio.wait(
         worker_tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED
     )
-    fatal_error: BaseException | None = None
-    for task in done:
-        if task is stop_task:
-            continue
-        if task.cancelled():
-            fatal_error = RuntimeError(f"{task.get_name()} task was cancelled")
-        else:
-            fatal_error = task.exception() or RuntimeError(
-                f"{task.get_name()} task stopped unexpectedly"
-            )
-        break
+    fatal_error = _background_failure(done, stop_task)
 
     stop_event.set()
     logger.info("Shutdown requested; stopping market receiver and alert engine")

@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from app.market_stream import BinanceAggTradeReceiver
+from app.market_stream import BinanceAggTradeReceiver, _reconnect_delay
 
 
 class MarketMessageParsingTests(unittest.TestCase):
@@ -52,6 +52,13 @@ class MarketMessageParsingTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_reconnect_backoff_is_bounded_for_huge_failure_counts(self) -> None:
+        self.assertEqual(
+            [_reconnect_delay(failures) for failures in range(7)],
+            [1, 2, 4, 8, 16, 30, 30],
+        )
+        self.assertEqual(_reconnect_delay(1_000_000), 30)
 
 
 if __name__ == "__main__":

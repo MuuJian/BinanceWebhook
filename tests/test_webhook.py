@@ -8,7 +8,7 @@ import httpx
 
 from app.alert_engine import Alert
 from app.config import WebhookConfig
-from app.webhook import WebhookWorker
+from app.webhook import WebhookWorker, _retry_delay
 
 
 def _alert() -> Alert:
@@ -67,6 +67,23 @@ class WebhookDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.post.await_count, 3)
         self.assertEqual([call.args[0] for call in sleep.await_args_list], [1, 2])
+
+    async def test_request_timeout_response_is_retried(self) -> None:
+        client = AsyncMock()
+        client.post.side_effect = [httpx.Response(408), httpx.Response(200)]
+
+        with patch("app.webhook.asyncio.sleep", new=AsyncMock()) as sleep:
+            await self.worker(max_retries=1)._deliver(client, _alert())
+
+        self.assertEqual(client.post.await_count, 2)
+        sleep.assert_awaited_once_with(1)
+
+    def test_retry_delay_is_bounded(self) -> None:
+        self.assertEqual(
+            [_retry_delay(attempt) for attempt in range(1, 8)],
+            [1, 2, 4, 8, 16, 30, 30],
+        )
+        self.assertEqual(_retry_delay(1_000_000), 30)
 
     async def test_network_error_exhausts_configured_attempts(self) -> None:
         client = AsyncMock()
