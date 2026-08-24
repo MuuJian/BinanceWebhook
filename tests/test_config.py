@@ -28,7 +28,6 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.window_seconds, 120)
         self.assertEqual(config.threshold_pct, 3)
-        self.assertEqual(config.cooldown_seconds, 30)
 
     def test_deployment_environment_wins_over_dotenv(self) -> None:
         config = self.load(THRESHOLD_PCT="6")

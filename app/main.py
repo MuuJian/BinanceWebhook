@@ -86,7 +86,6 @@ async def run_worker(config: AppConfig) -> None:
         symbols=config.symbols,
         queue=queue,
         threshold_pct=config.threshold_pct,
-        cooldown_seconds=config.cooldown_seconds,
         window_seconds=config.window_seconds,
     )
     receiver = BinanceAggTradeReceiver(
@@ -99,11 +98,10 @@ async def run_worker(config: AppConfig) -> None:
 
     logger.info(
         "Worker started: symbols=%s anchor_window=%ss threshold=%g%% "
-        "global_cooldown=%gs evaluation=every-trade",
+        "evaluation=every-trade",
         ",".join(config.symbols),
         config.window_seconds,
         config.threshold_pct,
-        config.cooldown_seconds,
     )
 
     market_task = asyncio.create_task(receiver.run(stop_event), name="market")

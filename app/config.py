@@ -36,7 +36,6 @@ class AppConfig:
     websocket_proxy: str | None
     window_seconds: int
     threshold_pct: float
-    cooldown_seconds: float
     webhook: WebhookConfig
     log_level: int
 
@@ -136,7 +135,6 @@ def load_config(*, env_path: Path = DEFAULT_ENV_PATH) -> AppConfig:
         websocket_proxy=_proxy_url(),
         window_seconds=window_seconds,
         threshold_pct=threshold_pct,
-        cooldown_seconds=_positive_float("COOLDOWN_SECONDS", "30"),
         webhook=WebhookConfig(
             url=_webhook_url(),
             timeout_seconds=_positive_float("WEBHOOK_TIMEOUT_SECONDS", "10"),

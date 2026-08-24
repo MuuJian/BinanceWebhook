@@ -15,7 +15,6 @@ def _config() -> AppConfig:
         websocket_proxy=None,
         window_seconds=300,
         threshold_pct=2,
-        cooldown_seconds=30,
         webhook=WebhookConfig(
             url="https://example.com/hook",
             timeout_seconds=10,

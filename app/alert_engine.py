@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
-import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -37,29 +35,25 @@ class AlertEngine:
         symbols: tuple[str, ...],
         queue: asyncio.Queue[Alert],
         threshold_pct: float,
-        cooldown_seconds: float,
         window_seconds: int,
     ) -> None:
         self.symbols = symbols
         self.queue = queue
         self.threshold_pct = threshold_pct
-        self.cooldown_seconds = cooldown_seconds
         self.window_ms = window_seconds * 1000
-        self._cooldown_until = -math.inf
         self._queue_blocked = False
         self._states = {symbol: _AnchorState() for symbol in symbols}
 
     def observe(self, symbol: str, price: float, event_time_ms: int) -> None:
         """Process one accepted Binance trade immediately."""
 
-        now = time.monotonic()
         state = self._states[symbol]
         state.current_price = price
         state.latest_event_time_ms = event_time_ms
 
         if state.anchor_price is None:
             self._set_anchor(symbol, state, reason="initialized")
-            self._dispatch_pending(now)
+            self._dispatch_pending()
             return
 
         direction, movement = self._movement(state.anchor_price, price)
@@ -73,19 +67,15 @@ class AlertEngine:
             if event_time_ms - state.anchor_event_time_ms >= self.window_ms:
                 self._set_anchor(symbol, state, reason="window expired")
 
-        # Anchor maintenance never pauses. Only dispatch is gated by cooldown.
-        self._dispatch_pending(now)
+        self._dispatch_pending()
 
     def reset_all(self) -> None:
-        """Forget disconnected market state without bypassing global cooldown."""
+        """Forget disconnected market state."""
 
         self._states = {symbol: _AnchorState() for symbol in self.symbols}
         logger.info("Price anchors cleared after market disconnect")
 
-    def _dispatch_pending(self, now: float) -> None:
-        if now < self._cooldown_until:
-            return
-
+    def _dispatch_pending(self) -> None:
         selected: tuple[str, _AnchorState] | None = None
         selected_key: tuple[int, float, str] | None = None
         for symbol, state in self._states.items():
@@ -122,14 +112,11 @@ class AlertEngine:
             self._queue_blocked = False
 
         self._set_anchor(symbol, state, reason="alert triggered")
-        self._cooldown_until = now + self.cooldown_seconds
         logger.info(
-            "Price alert queued: symbol=%s direction=%s movement=%.2f%%; "
-            "all alerts paused for %gs",
+            "Price alert queued: symbol=%s direction=%s movement=%.2f%%",
             symbol,
             alert.direction,
             alert.movement_pct,
-            self.cooldown_seconds,
         )
 
     @staticmethod
